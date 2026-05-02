@@ -1,0 +1,760 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { createClient } from "@/lib/supabase";
+import type { StoredMeal } from "@/lib/fueled-storage";
+import {
+  DEFAULT_GOAL_LS,
+  addDays,
+  formatDateKey,
+  parseDateKey,
+  readBurnTotal,
+  readGoal,
+  readMealsStored,
+  readWorkoutsStored,
+  writeBurnTotal,
+  writeMealsStored,
+  writeWorkoutsStored,
+} from "@/lib/fueled-storage";
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import VoiceDictationButton from "@/components/VoiceDictationButton";
+
+const TODAY_FALLBACK = {
+  calorieGoal: DEFAULT_GOAL_LS.calories,
+  proteinGoal: DEFAULT_GOAL_LS.protein,
+  carbsGoal: DEFAULT_GOAL_LS.carbs,
+  fatGoal: DEFAULT_GOAL_LS.fats,
+} as const;
+
+export type Meal = {
+  id: string;
+  text: string;
+  label: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+};
+
+export type Workout = {
+  id: string;
+  description: string;
+  caloriesBurned: number;
+};
+
+type GoalsRow = Record<string, unknown>;
+
+function rowNumber(row: GoalsRow | null, keys: string[], fallback: number): number {
+  if (!row) return fallback;
+  for (const k of keys) {
+    const v = row[k];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+      const n = Number(v);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return fallback;
+}
+
+export default function TodayTab() {
+  const [mealInput, setMealInput] = useState("");
+  const [mealLoading, setMealLoading] = useState(false);
+  const [mealError, setMealError] = useState<string | null>(null);
+
+  const [activityText, setActivityText] = useState("");
+  const [activityKcal, setActivityKcal] = useState("");
+
+  const [todayKey] = useState(() => formatDateKey(new Date()));
+
+  const [calorieGoal, setCalorieGoal] = useState<number>(
+    TODAY_FALLBACK.calorieGoal
+  );
+  const [proteinGoal, setProteinGoal] = useState<number>(
+    TODAY_FALLBACK.proteinGoal
+  );
+  const [carbsGoal, setCarbsGoal] = useState<number>(
+    TODAY_FALLBACK.carbsGoal
+  );
+  const [fatGoal, setFatGoal] = useState<number>(TODAY_FALLBACK.fatGoal);
+  const [goalsLoading, setGoalsLoading] = useState(true);
+
+  const [meals, setMeals] = useState<Meal[]>([]);
+  const [workouts, setWorkouts] = useState<Workout[]>([]);
+  const [lsHydrated, setLsHydrated] = useState(false);
+  const [weekLsTick, setWeekLsTick] = useState(0);
+
+  useEffect(() => {
+    const storedMealsRaw = readMealsStored(todayKey);
+    setMeals(
+      storedMealsRaw.map((m: StoredMeal) => ({
+        id: m.id,
+        text: m.text,
+        label: m.label,
+        calories: m.calories,
+        protein_g: m.protein_g,
+        carbs_g: m.carbs_g,
+        fat_g: m.fat_g,
+      }))
+    );
+    const w = readWorkoutsStored(todayKey);
+    setWorkouts(w);
+    setLsHydrated(true);
+  }, [todayKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !lsHydrated) return;
+    writeMealsStored(todayKey, meals);
+    const burnSum = workouts.reduce(
+      (s, w0) => s + Math.max(0, w0.caloriesBurned),
+      0
+    );
+    writeBurnTotal(todayKey, burnSum);
+    writeWorkoutsStored(todayKey, workouts);
+  }, [meals, workouts, todayKey, lsHydrated]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchGoals() {
+      setGoalsLoading(true);
+
+      const lg = readGoal();
+      if (lg) {
+        setCalorieGoal(Math.round(lg.calories));
+        setProteinGoal(Math.round(lg.protein));
+        setCarbsGoal(Math.round(lg.carbs));
+        setFatGoal(Math.round(lg.fats));
+        setGoalsLoading(false);
+        return;
+      }
+
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      if (!user || cancelled) {
+        setGoalsLoading(false);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("goals")
+        .select("*")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (cancelled) return;
+
+      if (error) {
+        console.error("[TodayTab] goals fetch:", error.message);
+      }
+
+      const row = (data ?? null) as GoalsRow | null;
+
+      setCalorieGoal(
+        Math.round(
+          rowNumber(
+            row,
+            ["calorie_goal", "calories_goal", "daily_calories", "calories"],
+            TODAY_FALLBACK.calorieGoal
+          )
+        )
+      );
+      setProteinGoal(
+        Math.round(
+          rowNumber(
+            row,
+            ["protein_g", "protein"],
+            TODAY_FALLBACK.proteinGoal
+          )
+        )
+      );
+      setCarbsGoal(
+        Math.round(
+          rowNumber(
+            row,
+            ["carbs_g", "carbs", "carbohydrates"],
+            TODAY_FALLBACK.carbsGoal
+          )
+        )
+      );
+      setFatGoal(
+        Math.round(
+          rowNumber(row, ["fat_g", "fat", "fats"], TODAY_FALLBACK.fatGoal)
+        )
+      );
+      setGoalsLoading(false);
+    }
+
+    void fetchGoals();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    function refetchGoals() {
+      const lg = readGoal();
+      if (!lg) return;
+      setCalorieGoal(Math.round(lg.calories));
+      setProteinGoal(Math.round(lg.protein));
+      setCarbsGoal(Math.round(lg.carbs));
+      setFatGoal(Math.round(lg.fats));
+    }
+
+    window.addEventListener("focus", refetchGoals);
+    window.addEventListener("storage", refetchGoals);
+    return () => {
+      window.removeEventListener("focus", refetchGoals);
+      window.removeEventListener("storage", refetchGoals);
+    };
+  }, []);
+
+  useEffect(() => {
+    function bumpWeekChart(e: StorageEvent) {
+      const k = e.key ?? "";
+      if (
+        k.startsWith("fueled_meals_") ||
+        k.startsWith("fueled_workouts_") ||
+        k.startsWith("fueled_burn_") ||
+        k === "fueled_goal"
+      ) {
+        setWeekLsTick((t) => t + 1);
+      }
+    }
+    window.addEventListener("storage", bumpWeekChart);
+    return () => window.removeEventListener("storage", bumpWeekChart);
+  }, []);
+
+  const totals = useMemo(() => {
+    const consumed = meals.reduce((s, m) => s + m.calories, 0);
+    const burned = workouts.reduce((s, w) => s + Math.max(0, w.caloriesBurned), 0);
+    const proteinConsumed = meals.reduce((s, m) => s + m.protein_g, 0);
+    const carbsConsumed = meals.reduce((s, m) => s + m.carbs_g, 0);
+    const fatConsumed = meals.reduce((s, m) => s + m.fat_g, 0);
+
+    const budget = calorieGoal + burned;
+    const remaining = calorieGoal - consumed + burned;
+
+    const overBudget = consumed > budget;
+    const barDenominator = Math.max(calorieGoal, 1);
+
+    let barPct: number;
+    if (budget > 0) {
+      barPct = Math.min(100, (consumed / budget) * 100);
+    } else {
+      barPct = 100;
+    }
+    if (overBudget) barPct = 100;
+
+    return {
+      consumed,
+      burned,
+      proteinConsumed,
+      carbsConsumed,
+      fatConsumed,
+      budget,
+      remaining,
+      overBudget,
+      barPct,
+    };
+  }, [meals, workouts, calorieGoal]);
+
+  const weekSeries = useMemo(() => {
+    const end = new Date();
+    const rows: Array<{
+      dk: string;
+      label: string;
+      weekShort: string;
+      consumed: number;
+      budget: number;
+      delta: number;
+    }> = [];
+
+    for (let offset = -6; offset <= 0; offset += 1) {
+      const d = addDays(end, offset);
+      const dk = formatDateKey(d);
+      const isToday = dk === todayKey;
+
+      let consumed = 0;
+      let burned = 0;
+
+      if (isToday) {
+        consumed = meals.reduce((s, m) => s + Math.max(0, m.calories), 0);
+        burned = workouts.reduce((s, w) => s + Math.max(0, w.caloriesBurned), 0);
+      } else {
+        consumed = readMealsStored(dk).reduce(
+          (s, m) => s + Math.max(0, m.calories),
+          0
+        );
+        const wo = readWorkoutsStored(dk);
+        burned = wo.reduce((s, w) => s + Math.max(0, w.caloriesBurned), 0);
+        if (burned <= 0) burned = readBurnTotal(dk);
+      }
+
+      const budget = calorieGoal + burned;
+      rows.push({
+        dk,
+        label: parseDateKey(dk).toLocaleDateString("pl-PL", {
+          day: "numeric",
+          month: "short",
+        }),
+        weekShort: parseDateKey(dk).toLocaleDateString("pl-PL", {
+          weekday: "short",
+        }),
+        consumed: Math.round(consumed),
+        budget: Math.round(budget),
+        delta: Math.round(consumed - budget),
+      });
+    }
+
+    return rows;
+  }, [todayKey, meals, workouts, calorieGoal, weekLsTick]);
+
+  async function handleAddMeal(e: React.FormEvent) {
+    e.preventDefault();
+    setMealError(null);
+
+    const text = mealInput.trim();
+    if (!text) return;
+
+    setMealLoading(true);
+
+    try {
+      const res = await fetch("/api/parse-food", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const msg =
+          typeof errJson === "object" && errJson !== null && "message" in errJson
+            ? String((errJson as { message?: string }).message)
+            : typeof errJson === "object" && errJson !== null && "error" in errJson
+              ? String((errJson as { error?: string }).error)
+              : `Błąd ${res.status}`;
+        setMealError(msg || "Nie udało się dodać posiłku");
+        return;
+      }
+
+      const parsed = (await res.json()) as {
+        name?: string;
+        kcal?: number;
+        protein?: number;
+        carbs?: number;
+        fat?: number;
+      };
+
+      setMeals((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          text,
+          label: typeof parsed.name === "string" ? parsed.name : "Posiłek",
+          calories: typeof parsed.kcal === "number" ? parsed.kcal : 0,
+          protein_g: typeof parsed.protein === "number" ? parsed.protein : 0,
+          carbs_g: typeof parsed.carbs === "number" ? parsed.carbs : 0,
+          fat_g: typeof parsed.fat === "number" ? parsed.fat : 0,
+        },
+      ]);
+
+      setMealInput("");
+    } catch {
+      setMealError("Brak połączenia lub błąd sieci.");
+    } finally {
+      setMealLoading(false);
+    }
+  }
+
+  function removeMeal(id: string) {
+    setMeals((prev) => prev.filter((m) => m.id !== id));
+  }
+
+  function handleAddActivity(e: React.FormEvent) {
+    e.preventDefault();
+
+    const kcalRaw = Number.parseInt(activityKcal, 10);
+    const caloriesBurned = Number.isFinite(kcalRaw) && kcalRaw > 0 ? kcalRaw : 0;
+    const description = activityText.trim();
+
+    if (!description || caloriesBurned <= 0) return;
+
+    setWorkouts((prev) => [...prev, { id: crypto.randomUUID(), description, caloriesBurned }]);
+    setActivityText("");
+    setActivityKcal("");
+  }
+
+  function removeActivity(id: string) {
+    setWorkouts((prev) => prev.filter((w) => w.id !== id));
+  }
+
+  const remainingLabel =
+    totals.remaining >= 0
+      ? `${Math.round(totals.remaining)} pozostało`
+      : `${Math.round(Math.abs(totals.remaining))} przekroczone`;
+
+  const remainingColorClass =
+    totals.remaining >= 0 ? "text-[#3B6D11]" : "text-red-500";
+
+  return (
+    <div className="flex flex-col gap-5 text-white">
+      {goalsLoading ? (
+        <p className="text-center text-xs text-white/45">Ładowanie celów...</p>
+      ) : null}
+
+      <section>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-xl bg-[#1E1E1E] p-3 text-center shadow-sm ring-1 ring-white/10">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-white/45">Spożyte</p>
+            <p className="mt-1 text-2xl font-semibold text-[#BA7517]" tabIndex={0}>
+              {Math.round(totals.consumed)}
+            </p>
+            <p className="text-[11px] text-white/35">kcal</p>
+          </div>
+
+          <div className="rounded-xl bg-[#1E1E1E] p-3 text-center shadow-sm ring-1 ring-white/10">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-white/45">Cel</p>
+            <p className="mt-1 text-2xl font-semibold">{calorieGoal}</p>
+            <p className={`text-[11px] font-medium ${remainingColorClass}`}>{remainingLabel}</p>
+          </div>
+
+          <div className="rounded-xl bg-[#1E1E1E] p-3 text-center shadow-sm ring-1 ring-white/10">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-white/45">Spalone</p>
+            <p className="mt-1 text-2xl font-semibold text-[#3B6D11]" tabIndex={0}>
+              {Math.round(totals.burned)}
+            </p>
+            <p className="text-[11px] text-white/35">kcal</p>
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <div className="h-2.5 overflow-hidden rounded-full bg-white/10">
+            <div
+              role="progressbar"
+              aria-valuenow={Math.round(totals.barPct)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Postęp kalorii"
+              className={`h-full rounded-full transition-all ${
+                totals.overBudget ? "bg-red-500" : "bg-[#EF9F27]"
+              }`}
+              style={{ width: `${totals.barPct}%` }}
+            />
+          </div>
+          <div className="mt-1 flex justify-between text-[10px] text-white/35">
+            <span>spożyte / budżet</span>
+            <span>{Math.round(totals.consumed)} / {Math.round(totals.budget)}</span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="rounded-xl bg-[#1E1E1E] p-3 text-center text-sm ring-1 ring-white/10">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-white/45">Białko</p>
+            <p className="mt-2 font-semibold">
+              {Math.round(totals.proteinConsumed)}g / <span className="text-white/70">{proteinGoal}g</span>
+            </p>
+          </div>
+          <div className="rounded-xl bg-[#1E1E1E] p-3 text-center text-sm ring-1 ring-white/10">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-white/45">Węgle</p>
+            <p className="mt-2 font-semibold">
+              {Math.round(totals.carbsConsumed)}g / <span className="text-white/70">{carbsGoal}g</span>
+            </p>
+          </div>
+          <div className="rounded-xl bg-[#1E1E1E] p-3 text-center text-sm ring-1 ring-white/10">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-white/45">Tłuszcz</p>
+            <p className="mt-2 font-semibold">
+              {Math.round(totals.fatConsumed)}g / <span className="text-white/70">{fatGoal}g</span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/80">
+          POSIŁKI
+        </h2>
+        <p className="mb-2 text-[11px] leading-snug text-white/40">
+          <strong className="text-white/55">Mów</strong>: przeglądarka zamienia mowę na tekst. Poprawisz
+          jak trzeba, potem wyślij — kcal jak dotąd przez API.
+        </p>
+        <form onSubmit={handleAddMeal} className="space-y-3">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={mealInput}
+              onChange={(e) => setMealInput(e.target.value)}
+              placeholder="np. owsianka z bananem, 2 jajka, jogurt..."
+              className="min-w-0 flex-1 rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+              disabled={mealLoading}
+            />
+            <VoiceDictationButton
+              disabled={mealLoading}
+              onAppendTranscript={(t) =>
+                setMealInput((prev) =>
+                  prev.trim() ? `${prev.trim()} ${t}` : t
+                )
+              }
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={mealLoading}
+            className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5 disabled:opacity-55"
+          >
+            {mealLoading ? "Parsowanie…" : "Dodaj posiłek"}
+          </button>
+        </form>
+        {mealError ? <p className="mt-2 text-xs text-red-400">{mealError}</p> : null}
+
+        {meals.length === 0 ? (
+          <p className="mt-8 text-center text-sm text-white/35">Brak posiłków na dziś</p>
+        ) : (
+          <ul className="mt-4 space-y-2">
+            {meals.map((m) => (
+              <li
+                key={m.id}
+                className="flex items-start gap-3 rounded-xl bg-[#1E1E1E] px-3 py-2.5 text-sm ring-1 ring-white/10"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium leading-snug">{m.label}</p>
+                  <p className="truncate text-[11px] text-white/40">{m.text}</p>
+                  <p className="mt-1 text-xs text-[#BA7517]">{m.calories} kcal · B {m.protein_g} · W {m.carbs_g} · T {m.fat_g}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeMeal(m.id)}
+                  className="shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-red-400 hover:bg-white/10"
+                  aria-label="Usuń posiłek"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/80">
+          AKTYWNOŚĆ
+        </h2>
+        <form onSubmit={handleAddActivity} className="space-y-3">
+          <div className="flex items-start gap-2">
+            <textarea
+              rows={5}
+              value={activityText}
+              onChange={(e) => setActivityText(e.target.value)}
+              placeholder="Opisz aktywność — np. bieganie 5 km, tempo 5:30, siłownia..."
+              className="min-w-0 flex-1 resize-y rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm leading-relaxed text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+            />
+            <VoiceDictationButton
+              onAppendTranscript={(t) =>
+                setActivityText((prev) =>
+                  prev.trim() ? `${prev.trim()} ${t}` : t
+                )
+              }
+            />
+          </div>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            value={activityKcal}
+            onChange={(e) => setActivityKcal(e.target.value)}
+            placeholder="Spalone kcal"
+            className="w-full rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+          />
+          <button
+            type="submit"
+            className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5"
+          >
+            Dodaj aktywność
+          </button>
+        </form>
+
+        {workouts.length === 0 ? (
+          <p className="mt-8 flex flex-col items-center gap-2 text-center text-sm text-white/35">
+            <span aria-hidden className="text-lg">
+              ⌄
+            </span>
+            Brak aktywności na dziś
+          </p>
+        ) : (
+          <ul className="mt-4 space-y-2">
+            {workouts.map((w) => (
+              <li
+                key={w.id}
+                className="flex items-start gap-3 rounded-xl bg-[#1E1E1E] px-3 py-2.5 text-sm ring-1 ring-white/10"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="leading-snug text-white">{w.description}</p>
+                  <p className="mt-1 text-xs font-medium text-[#3B6D11]">−{Math.round(w.caloriesBurned)} kcal</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeActivity(w.id)}
+                  className="shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-red-400 hover:bg-white/10"
+                  aria-label="Usuń aktywność"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="touch-manipulation pb-2">
+        <h2 className="mb-1 text-[11px] font-bold uppercase tracking-widest text-white/80">
+          Ostatnie 7 dni — kcal
+        </h2>
+        <p className="mb-3 text-[11px] leading-snug text-white/45">
+          Pomarańczowa linia: spożyte. Jasna linia: budżet (cel {Math.round(calorieGoal)} kcal + spalone tego dnia).
+          Liczba nad słupkiem: bilans spożyte − budżet (+nadwyżka / −zapas).
+        </p>
+
+        <div className="mb-2 grid grid-cols-7 gap-1 text-[9px] leading-tight sm:text-[10px]">
+          {weekSeries.map((row) => (
+            <div key={row.dk} className="flex flex-col items-center text-center">
+              <span className="font-semibold capitalize text-white/88">
+                {row.weekShort.replace(/\.$/, "")}
+              </span>
+              <span className="mt-0.5 text-white/50">
+                {row.consumed}/{row.budget}
+              </span>
+              <span
+                className={`mt-0.5 font-semibold tabular-nums ${
+                  row.delta === 0
+                    ? "text-white/40"
+                    : row.delta > 0
+                      ? "text-red-400"
+                      : "text-emerald-400"
+                }`}
+              >
+                {row.delta === 0
+                  ? "0"
+                  : row.delta > 0
+                    ? `+${row.delta}`
+                    : `${row.delta}`}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="rounded-xl border border-white/15 bg-[#1E1E1E] p-2 ring-1 ring-white/10">
+          <div className="h-[220px] w-full min-w-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart
+                data={weekSeries}
+                margin={{ top: 8, right: 4, left: -16, bottom: 4 }}
+              >
+                <CartesianGrid
+                  stroke="#333"
+                  strokeDasharray="3 6"
+                  opacity={0.85}
+                />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fill: "#9ca3af", fontSize: 9 }}
+                  tickLine={false}
+                  axisLine={{ stroke: "#333" }}
+                />
+                <YAxis
+                  tick={{ fill: "#9ca3af", fontSize: 10 }}
+                  width={36}
+                  tickLine={false}
+                  axisLine={{ stroke: "#333" }}
+                  domain={[0, "auto"]}
+                />
+                <Tooltip
+                  contentStyle={{
+                    border: "1px solid #333",
+                    background: "#151515",
+                    borderRadius: "10px",
+                  }}
+                  labelStyle={{ color: "#fafafa", fontWeight: 600 }}
+                  formatter={(value, name) => {
+                    const n =
+                      typeof value === "number" && Number.isFinite(value)
+                        ? value
+                        : Number(value);
+                    const v = Number.isFinite(n) ? Math.round(n) : 0;
+                    const nm = String(name);
+                    const label =
+                      nm === "consumed"
+                        ? "Spożyte"
+                        : nm === "budget"
+                          ? "Budżet (cel + spalone)"
+                          : nm;
+                    return [`${v} kcal`, label];
+                  }}
+                  labelFormatter={(_, payload) => {
+                    const raw = payload?.[0]?.payload as
+                      | (typeof weekSeries)[0]
+                      | undefined;
+                    if (!raw) return "";
+                    const bal =
+                      raw.delta === 0
+                        ? "równo z budżetem"
+                        : raw.delta > 0
+                          ? `nad budżetem o ${raw.delta} kcal`
+                          : `pod budżetem o ${Math.abs(raw.delta)} kcal`;
+                    return `${raw.weekShort.replace(/\.$/, "")} · ${bal}`;
+                  }}
+                />
+                <Legend
+                  wrapperStyle={{ fontSize: 11, paddingTop: 4 }}
+                  formatter={(v) => (
+                    <span style={{ color: "#d4d4d4" }}>
+                      {v === "consumed"
+                        ? "Spożyte"
+                        : v === "budget"
+                          ? "Budżet"
+                          : v}
+                    </span>
+                  )}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="consumed"
+                  name="consumed"
+                  stroke="#BA7517"
+                  strokeWidth={2}
+                  dot={{ r: 3, stroke: "#fafafa", strokeWidth: 1, fill: "#121212" }}
+                  activeDot={{ r: 5 }}
+                  isAnimationActive={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="budget"
+                  name="budget"
+                  stroke="#e5e5e5"
+                  strokeWidth={2}
+                  strokeDasharray="5 4"
+                  dot={{ r: 2.5, fill: "#e5e5e5" }}
+                  activeDot={{ r: 5 }}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}

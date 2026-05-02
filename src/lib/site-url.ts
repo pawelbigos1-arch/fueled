@@ -1,8 +1,13 @@
 /**
- * Użyj NEXT_PUBLIC_SITE_URL w .env.local, żeby ten sam adres co w Supabase
- * (Authentication → Site URL). Bez tego działa window.location.origin.
+ * Adres dla `emailRedirectTo` (Magic Link). Domyślnie: dokładnie to, co widzi przeglądarka
+ * — na Vercel (`https://fueled-ten.vercel.app` itd.) działa bez dodatkowych zmiennych.
  *
- * Przykład: http://127.0.0.1:3000  (bez ukośnika na końcu)
+ * Ustaw `NEXT_PUBLIC_SITE_URL` tylko gdy masz stałą domenę prod i chcesz wymusić ją nad
+ * origin przeglądarki (albo przy nietypowych reverse proxy).
+ * W Supabase ustaw taką samą bazę w Authentication → Site URL oraz Redirect URLs
+ * (`…/auth/callback`). Bez tego Magic Link się nie zamknie sesją na Twojej aplikacji.
+ *
+ * Przykład lokalnie: http://127.0.0.1:3000 (bez końcowego /)
  */
 export function getPublicSiteUrl(browserOrigin: string): string {
   const fromEnv =

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase";
 import TodayTab from "@/components/TodayTab";
 import PlanTab from "@/components/PlanTab";
@@ -27,9 +28,36 @@ function formatTodayPl(): string {
   });
 }
 
+function displayNameFromUser(user: User) {
+  const meta = user.user_metadata as Record<string, unknown> | undefined;
+  const fromFull =
+    typeof meta?.full_name === "string" ? meta.full_name.trim() : "";
+  const fromName =
+    typeof meta?.name === "string" ? meta.name.trim() : "";
+  const email = typeof user.email === "string" ? user.email.trim() : "";
+  const nick =
+    email && email.includes("@")
+      ? (email.split("@")[0] ?? email)
+      : email;
+  return fromFull || fromName || nick || "Użytkownik";
+}
+
 export default function AppPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<TabId>("today");
+  const [userLabel, setUserLabel] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const supabase = createClient();
+    void supabase.auth.getUser().then(({ data: { user } }) => {
+      if (cancelled || !user) return;
+      setUserLabel(displayNameFromUser(user));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleLogout = async () => {
     const supabase = createClient();
@@ -57,6 +85,9 @@ export default function AppPage() {
               />
             </h1>
             <div className="flex shrink-0 flex-col items-end gap-1 text-right">
+              <p className="max-w-[200px] truncate text-[13px] font-semibold leading-tight text-white/92">
+                {userLabel || "…"}
+              </p>
               <p className="text-[13px] capitalize leading-tight text-white/52">
                 {formatTodayPl()}
               </p>

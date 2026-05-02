@@ -5,6 +5,13 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase";
 import { getPublicSiteUrl } from "@/lib/site-url";
 
+function signInErrorMessage(message: string): string {
+  if (message.trim() === "email rate limit exceeded") {
+    return "Za dużo wiadomości na ten adres — poczekaj chwilę albo sprawdź SMTP w Supabase.";
+  }
+  return message;
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -53,7 +60,7 @@ export default function LoginPage() {
     });
 
     if (signInError) {
-      setError(signInError.message);
+      setError(signInErrorMessage(signInError.message));
       setLoading(false);
       return;
     }

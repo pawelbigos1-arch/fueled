@@ -13,6 +13,11 @@ import {
 } from "@/lib/fueled-storage";
 import VoiceDictationButton from "@/components/VoiceDictationButton";
 
+function parseGramInput(raw: string): number {
+  const n = Number.parseFloat(raw.replace(",", ".").trim());
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
+}
+
 function cardCls() {
   return "rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] p-3";
 }
@@ -36,9 +41,17 @@ export default function PlanTab() {
   );
 
   const [plan, setPlan] = useState<PlanMeal[]>([]);
+  const [planEntryMode, setPlanEntryMode] = useState<"ai" | "manual">("ai");
+
   const [inputText, setInputText] = useState("");
   const [loading, setLoading] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
+
+  const [manualLabel, setManualLabel] = useState("");
+  const [manualKcalStr, setManualKcalStr] = useState("");
+  const [manualPStr, setManualPStr] = useState("");
+  const [manualCStr, setManualCStr] = useState("");
+  const [manualFStr, setManualFStr] = useState("");
 
   useEffect(() => {
     const p = readPlan(day);
@@ -142,6 +155,47 @@ export default function PlanTab() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function addManualToPlan(e: React.FormEvent) {
+    e.preventDefault();
+    setParseError(null);
+
+    const label = manualLabel.trim();
+    const kcal = Math.round(
+      Number.parseFloat(manualKcalStr.replace(",", ".").trim())
+    );
+
+    if (!label) {
+      setParseError("Podaj nazwę posiłku.");
+      return;
+    }
+    if (!Number.isFinite(kcal) || kcal <= 0) {
+      setParseError("Podaj dodatnią liczbę kalorii.");
+      return;
+    }
+
+    const protein_g = parseGramInput(manualPStr);
+    const carbs_g = parseGramInput(manualCStr);
+    const fat_g = parseGramInput(manualFStr);
+
+    const meal: PlanMeal = {
+      id: crypto.randomUUID(),
+      text: label,
+      label,
+      calories: kcal,
+      protein_g,
+      carbs_g,
+      fat_g,
+      eaten: false,
+    };
+
+    persist([...plan, meal]);
+    setManualLabel("");
+    setManualKcalStr("");
+    setManualPStr("");
+    setManualCStr("");
+    setManualFStr("");
   }
 
   function markAte(mid: string) {
@@ -329,36 +383,134 @@ export default function PlanTab() {
         )}
       </section>
 
-      <form onSubmit={addFromParse} className="space-y-3">
-        <p className="text-[11px] leading-snug text-white/40">
-          <strong className="text-white/55">Mów</strong> podpowie tekst; potem Dodaj do planu —
-          makra jak przy ręcznym wpisaniu.
-        </p>
-        <div className="flex gap-2">
-          <input
-            value={inputText}
-            disabled={loading}
-            onChange={(e) => setInputText(e.target.value)}
-            placeholder="Opisz potrawę do dodania…"
-            className="min-w-0 flex-1 rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#534AB7]/60 disabled:opacity-60"
-          />
-          <VoiceDictationButton
-            disabled={loading}
-            onAppendTranscript={(t) =>
-              setInputText((prev) =>
-                prev.trim() ? `${prev.trim()} ${t}` : t
-              )
-            }
-          />
-        </div>
+      <div
+        className="mb-3 flex rounded-xl border border-[#2A2A2A] bg-black/20 p-0.5"
+        role="tablist"
+        aria-label="Sposób dodania do planu"
+      >
         <button
-          type="submit"
-          disabled={loading}
-          className="w-full rounded-xl border border-white/25 py-3 text-sm font-semibold hover:bg-white/10 disabled:opacity-50"
+          type="button"
+          role="tab"
+          aria-selected={planEntryMode === "ai"}
+          onClick={() => {
+            setPlanEntryMode("ai");
+            setParseError(null);
+          }}
+          className={`min-h-[44px] flex-1 rounded-[10px] px-3 text-xs font-semibold transition ${
+            planEntryMode === "ai"
+              ? "bg-[#534AB7] text-white"
+              : "text-white/60 hover:text-white"
+          }`}
         >
-          {loading ? "Parsowanie…" : "Dodaj do planu"}
+          Z opisu (AI)
         </button>
-      </form>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={planEntryMode === "manual"}
+          onClick={() => {
+            setPlanEntryMode("manual");
+            setParseError(null);
+          }}
+          className={`min-h-[44px] flex-1 rounded-[10px] px-3 text-xs font-semibold transition ${
+            planEntryMode === "manual"
+              ? "bg-[#534AB7] text-white"
+              : "text-white/60 hover:text-white"
+          }`}
+        >
+          Własne kcal
+        </button>
+      </div>
+      {planEntryMode === "ai" ? (
+        <form onSubmit={addFromParse} className="space-y-3">
+          <p className="text-[11px] leading-snug text-white/40">
+            <strong className="text-white/55">Mów</strong> podpowie tekst; potem Dodaj do planu —
+            makra z AI.
+          </p>
+          <div className="flex gap-2">
+            <input
+              value={inputText}
+              disabled={loading}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder="Opisz potrawę do dodania…"
+              className="min-w-0 flex-1 rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#534AB7]/60 disabled:opacity-60"
+            />
+            <VoiceDictationButton
+              disabled={loading}
+              onAppendTranscript={(t) =>
+                setInputText((prev) =>
+                  prev.trim() ? `${prev.trim()} ${t}` : t
+                )
+              }
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full rounded-xl border border-white/25 py-3 text-sm font-semibold hover:bg-white/10 disabled:opacity-50"
+          >
+            {loading ? "Parsowanie…" : "Dodaj do planu"}
+          </button>
+        </form>
+      ) : (
+        <form onSubmit={addManualToPlan} className="space-y-3">
+          <p className="text-[11px] leading-snug text-white/40">
+            Wpisz kalorie z etykiety lub własnych notatek; makra opcjonalne.
+          </p>
+          <input
+            type="text"
+            value={manualLabel}
+            onChange={(e) => setManualLabel(e.target.value)}
+            placeholder="Nazwa posiłku"
+            className="w-full rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#534AB7]/60"
+          />
+          <input
+            type="number"
+            inputMode="decimal"
+            min={1}
+            value={manualKcalStr}
+            onChange={(e) => setManualKcalStr(e.target.value)}
+            placeholder="Kalorie (kcal) *"
+            className="w-full rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#534AB7]/60"
+          />
+          <div className="grid grid-cols-3 gap-2">
+            <input
+              type="number"
+              inputMode="decimal"
+              min={0}
+              value={manualPStr}
+              onChange={(e) => setManualPStr(e.target.value)}
+              placeholder="B (g)"
+              className="rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] px-2 py-2.5 text-center text-sm text-white outline-none placeholder:text-white/35 focus:border-[#534AB7]/60"
+            />
+            <input
+              type="number"
+              inputMode="decimal"
+              min={0}
+              value={manualCStr}
+              onChange={(e) => setManualCStr(e.target.value)}
+              placeholder="W (g)"
+              className="rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] px-2 py-2.5 text-center text-sm text-white outline-none placeholder:text-white/35 focus:border-[#534AB7]/60"
+            />
+            <input
+              type="number"
+              inputMode="decimal"
+              min={0}
+              value={manualFStr}
+              onChange={(e) => setManualFStr(e.target.value)}
+              placeholder="T (g)"
+              className="rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] px-2 py-2.5 text-center text-sm text-white outline-none placeholder:text-white/35 focus:border-[#534AB7]/60"
+            />
+          </div>
+          <p className="text-[10px] text-white/35">Makra opcjonalne — puste zostanie 0 g.</p>
+          <button
+            type="submit"
+            className="w-full rounded-xl border border-white/25 py-3 text-sm font-semibold hover:bg-white/10"
+          >
+            Dodaj do planu
+          </button>
+        </form>
+      )}
       {parseError ? (
         <p className="text-center text-sm text-red-400">{parseError}</p>
       ) : null}

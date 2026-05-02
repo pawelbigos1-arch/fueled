@@ -66,10 +66,23 @@ function rowNumber(row: GoalsRow | null, keys: string[], fallback: number): numb
   return fallback;
 }
 
+function parseGramInput(raw: string): number {
+  const n = Number.parseFloat(raw.replace(",", ".").trim());
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
+}
+
 export default function TodayTab() {
+  const [mealEntryMode, setMealEntryMode] = useState<"ai" | "manual">("ai");
+
   const [mealInput, setMealInput] = useState("");
   const [mealLoading, setMealLoading] = useState(false);
   const [mealError, setMealError] = useState<string | null>(null);
+
+  const [manualLabel, setManualLabel] = useState("");
+  const [manualKcalStr, setManualKcalStr] = useState("");
+  const [manualPStr, setManualPStr] = useState("");
+  const [manualCStr, setManualCStr] = useState("");
+  const [manualFStr, setManualFStr] = useState("");
 
   const [activityText, setActivityText] = useState("");
   const [activityKcal, setActivityKcal] = useState("");
@@ -379,6 +392,48 @@ export default function TodayTab() {
     }
   }
 
+  function handleAddMealManual(e: React.FormEvent) {
+    e.preventDefault();
+    setMealError(null);
+
+    const label = manualLabel.trim();
+    const kcal = Math.round(
+      Number.parseFloat(manualKcalStr.replace(",", ".").trim())
+    );
+
+    if (!label) {
+      setMealError("Podaj nazwę posiłku.");
+      return;
+    }
+    if (!Number.isFinite(kcal) || kcal <= 0) {
+      setMealError("Podaj dodatnią liczbę kalorii.");
+      return;
+    }
+
+    const protein_g = parseGramInput(manualPStr);
+    const carbs_g = parseGramInput(manualCStr);
+    const fat_g = parseGramInput(manualFStr);
+
+    setMeals((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        text: label,
+        label,
+        calories: kcal,
+        protein_g,
+        carbs_g,
+        fat_g,
+      },
+    ]);
+
+    setManualLabel("");
+    setManualKcalStr("");
+    setManualPStr("");
+    setManualCStr("");
+    setManualFStr("");
+  }
+
   function removeMeal(id: string) {
     setMeals((prev) => prev.filter((m) => m.id !== id));
   }
@@ -489,36 +544,133 @@ export default function TodayTab() {
           POSIŁKI
         </h2>
         <p className="mb-2 text-[11px] leading-snug text-white/40">
-          <strong className="text-white/55">Mów</strong>: przeglądarka zamienia mowę na tekst. Poprawisz
-          jak trzeba, potem wyślij — kcal jak dotąd przez API.
+          <strong className="text-white/55">AI</strong> szacuje makra z opisu;{" "}
+          <strong className="text-white/55">własne kcal</strong> — gdy znasz wartość z opakowania
+          lub innego źródła. <strong className="text-white/55">Mów</strong> przy polu opisu zamienia
+          mowę na tekst.
         </p>
-        <form onSubmit={handleAddMeal} className="space-y-3">
-          <div className="flex gap-2">
+        <div
+          className="mb-3 flex rounded-xl border border-white/12 bg-black/25 p-0.5"
+          role="tablist"
+          aria-label="Sposób dodania posiłku"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mealEntryMode === "ai"}
+            onClick={() => {
+              setMealEntryMode("ai");
+              setMealError(null);
+            }}
+            className={`min-h-[44px] flex-1 rounded-[10px] px-3 text-xs font-semibold transition ${
+              mealEntryMode === "ai"
+                ? "bg-[#EF9F27] text-black"
+                : "text-white/60 hover:text-white"
+            }`}
+          >
+            Z opisu (AI)
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mealEntryMode === "manual"}
+            onClick={() => {
+              setMealEntryMode("manual");
+              setMealError(null);
+            }}
+            className={`min-h-[44px] flex-1 rounded-[10px] px-3 text-xs font-semibold transition ${
+              mealEntryMode === "manual"
+                ? "bg-[#EF9F27] text-black"
+                : "text-white/60 hover:text-white"
+            }`}
+          >
+            Własne kcal
+          </button>
+        </div>
+        {mealEntryMode === "ai" ? (
+          <form onSubmit={handleAddMeal} className="space-y-3">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={mealInput}
+                onChange={(e) => setMealInput(e.target.value)}
+                placeholder="np. owsianka z bananem, 2 jajka, jogurt..."
+                className="min-w-0 flex-1 rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+                disabled={mealLoading}
+              />
+              <VoiceDictationButton
+                disabled={mealLoading}
+                onAppendTranscript={(t) =>
+                  setMealInput((prev) =>
+                    prev.trim() ? `${prev.trim()} ${t}` : t
+                  )
+                }
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={mealLoading}
+              className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5 disabled:opacity-55"
+            >
+              {mealLoading ? "Parsowanie…" : "Dodaj posiłek"}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleAddMealManual} className="space-y-3">
             <input
               type="text"
-              value={mealInput}
-              onChange={(e) => setMealInput(e.target.value)}
-              placeholder="np. owsianka z bananem, 2 jajka, jogurt..."
-              className="min-w-0 flex-1 rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
-              disabled={mealLoading}
+              value={manualLabel}
+              onChange={(e) => setManualLabel(e.target.value)}
+              placeholder="Nazwa posiłku"
+              className="w-full rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
             />
-            <VoiceDictationButton
-              disabled={mealLoading}
-              onAppendTranscript={(t) =>
-                setMealInput((prev) =>
-                  prev.trim() ? `${prev.trim()} ${t}` : t
-                )
-              }
+            <input
+              type="number"
+              inputMode="decimal"
+              min={1}
+              value={manualKcalStr}
+              onChange={(e) => setManualKcalStr(e.target.value)}
+              placeholder="Kalorie (kcal) *"
+              className="w-full rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
             />
-          </div>
-          <button
-            type="submit"
-            disabled={mealLoading}
-            className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5 disabled:opacity-55"
-          >
-            {mealLoading ? "Parsowanie…" : "Dodaj posiłek"}
-          </button>
-        </form>
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={manualPStr}
+                onChange={(e) => setManualPStr(e.target.value)}
+                placeholder="B (g)"
+                className="rounded-xl border border-white/15 bg-[#1E1E1E] px-2 py-2.5 text-center text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+              />
+              <input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={manualCStr}
+                onChange={(e) => setManualCStr(e.target.value)}
+                placeholder="W (g)"
+                className="rounded-xl border border-white/15 bg-[#1E1E1E] px-2 py-2.5 text-center text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+              />
+              <input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={manualFStr}
+                onChange={(e) => setManualFStr(e.target.value)}
+                placeholder="T (g)"
+                className="rounded-xl border border-white/15 bg-[#1E1E1E] px-2 py-2.5 text-center text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+              />
+            </div>
+            <p className="text-[10px] text-white/35">Makra opcjonalne — puste zostanie 0 g.</p>
+            <button
+              type="submit"
+              className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5"
+            >
+              Dodaj posiłek
+            </button>
+          </form>
+        )}
         {mealError ? <p className="mt-2 text-xs text-red-400">{mealError}</p> : null}
 
         {meals.length === 0 ? (

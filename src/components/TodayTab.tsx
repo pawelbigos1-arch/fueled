@@ -1,20 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase";
-import type { StoredMeal } from "@/lib/fueled-storage";
 import {
   DEFAULT_GOAL_LS,
   addDays,
   formatDateKey,
   parseDateKey,
-  readBurnTotal,
-  readGoal,
-  readMealsStored,
-  readWorkoutsStored,
-  writeBurnTotal,
-  writeMealsStored,
-  writeWorkoutsStored,
 } from "@/lib/fueled-storage";
 import {
   CartesianGrid,
@@ -51,19 +43,56 @@ export type Workout = {
   caloriesBurned: number;
 };
 
-type GoalsRow = Record<string, unknown>;
+type MealRowDb = {
+  id: string;
+  name: string;
+  kcal: number | null;
+  protein: number | null;
+  carbs: number | null;
+  fat: number | null;
+};
 
-function rowNumber(row: GoalsRow | null, keys: string[], fallback: number): number {
-  if (!row) return fallback;
-  for (const k of keys) {
-    const v = row[k];
-    if (typeof v === "number" && Number.isFinite(v)) return v;
-    if (typeof v === "string") {
-      const n = Number(v);
-      if (Number.isFinite(n)) return n;
-    }
+function mapMealsDb(rows: MealRowDb[]): Meal[] {
+  return rows.map((r) => {
+    const name = typeof r.name === "string" ? r.name : "Posiłek";
+    return {
+      id: r.id,
+      text: name,
+      label: name,
+      calories: Math.max(0, Math.round(Number(r.kcal) || 0)),
+      protein_g: Math.max(0, Math.round(Number(r.protein) || 0)),
+      carbs_g: Math.max(0, Math.round(Number(r.carbs) || 0)),
+      fat_g: Math.max(0, Math.round(Number(r.fat) || 0)),
+    };
+  });
+}
+
+function goalsFromRow(
+  row: Record<string, unknown> | null
+): {
+  calorieGoal: number;
+  proteinGoal: number;
+  carbsGoal: number;
+  fatGoal: number;
+} {
+  if (
+    !row ||
+    typeof row.kcal !== "number" ||
+    !Number.isFinite(row.kcal)
+  ) {
+    return {
+      calorieGoal: TODAY_FALLBACK.calorieGoal,
+      proteinGoal: TODAY_FALLBACK.proteinGoal,
+      carbsGoal: TODAY_FALLBACK.carbsGoal,
+      fatGoal: TODAY_FALLBACK.fatGoal,
+    };
   }
-  return fallback;
+  return {
+    calorieGoal: Math.round(row.kcal),
+    proteinGoal: Math.round(Number(row.protein) || TODAY_FALLBACK.proteinGoal),
+    carbsGoal: Math.round(Number(row.carbs) || TODAY_FALLBACK.carbsGoal),
+    fatGoal: Math.round(Number(row.fat) || TODAY_FALLBACK.fatGoal),
+  };
 }
 
 function parseGramInput(raw: string): number {
@@ -100,155 +129,153 @@ export default function TodayTab() {
   );
   const [fatGoal, setFatGoal] = useState<number>(TODAY_FALLBACK.fatGoal);
   const [goalsLoading, setGoalsLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(true);
 
   const [meals, setMeals] = useState<Meal[]>([]);
   const [workouts, setWorkouts] = useState<Workout[]>([]);
-  const [lsHydrated, setLsHydrated] = useState(false);
-  const [weekLsTick, setWeekLsTick] = useState(0);
+  /** Suma dzienna spożyte / spalone wg daty dla wykresu 7 dni */
+  const [weekAgg, setWeekAgg] = useState<
+    Record<string, { consumed: number; burned: number }>
+  >({});
 
-  useEffect(() => {
-    const storedMealsRaw = readMealsStored(todayKey);
-    setMeals(
-      storedMealsRaw.map((m: StoredMeal) => ({
-        id: m.id,
-        text: m.text,
-        label: m.label,
-        calories: m.calories,
-        protein_g: m.protein_g,
-        carbs_g: m.carbs_g,
-        fat_g: m.fat_g,
+  const applyGoals = useCallback((row: Record<string, unknown> | null) => {
+    const g = goalsFromRow(row);
+    setCalorieGoal(g.calorieGoal);
+    setProteinGoal(g.proteinGoal);
+    setCarbsGoal(g.carbsGoal);
+    setFatGoal(g.fatGoal);
+  }, []);
+
+  const loadGoalsOnly = useCallback(async () => {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      applyGoals(null);
+      return;
+    }
+    const { data, error } = await supabase
+      .from("goals")
+      .select("*")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (error) console.error("[TodayTab] goals fetch:", error.message);
+    applyGoals((data ?? null) as Record<string, unknown> | null);
+  }, [applyGoals]);
+
+  const fetchWeekTotals = useCallback(
+    async (userId: string) => {
+      const supabase = createClient();
+      const end = formatDateKey(new Date());
+      const start = formatDateKey(addDays(new Date(), -6));
+
+      const [{ data: mt, error: em }, { data: at, error: ea }] =
+        await Promise.all([
+          supabase
+            .from("meals")
+            .select("date,kcal")
+            .eq("user_id", userId)
+            .gte("date", start)
+            .lte("date", end),
+          supabase
+            .from("activities")
+            .select("date,kcal_burned")
+            .eq("user_id", userId)
+            .gte("date", start)
+            .lte("date", end),
+        ]);
+
+      if (em) console.error("[TodayTab] week meals:", em.message);
+      if (ea) console.error("[TodayTab] week activities:", ea.message);
+
+      const agg: Record<string, { consumed: number; burned: number }> = {};
+
+      type M = { date: string; kcal: number | null };
+      type A = { date: string; kcal_burned: number | null };
+      ((mt ?? []) as M[]).forEach(({ date, kcal }) => {
+        if (!date) return;
+        if (!agg[date]) agg[date] = { consumed: 0, burned: 0 };
+        agg[date].consumed += Math.max(0, Math.round(Number(kcal) || 0));
+      });
+      ((at ?? []) as A[]).forEach(({ date, kcal_burned }) => {
+        if (!date) return;
+        if (!agg[date]) agg[date] = { consumed: 0, burned: 0 };
+        agg[date].burned += Math.max(
+          0,
+          Math.round(Number(kcal_burned) || 0)
+        );
+      });
+
+      setWeekAgg(agg);
+    },
+    []
+  );
+
+  const hydrate = useCallback(async () => {
+    setGoalsLoading(true);
+    setDataLoading(true);
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setMeals([]);
+      setWorkouts([]);
+      setWeekAgg({});
+      applyGoals(null);
+      setGoalsLoading(false);
+      setDataLoading(false);
+      return;
+    }
+
+    const uid = user.id;
+
+    const [{ data: gRow, error: eg }, { data: mRows, error: em }, { data: aRows, error: ea }] =
+      await Promise.all([
+        supabase.from("goals").select("*").eq("user_id", uid).maybeSingle(),
+        supabase.from("meals").select("*").eq("user_id", uid).eq("date", todayKey),
+        supabase.from("activities").select("*").eq("user_id", uid).eq("date", todayKey),
+      ]);
+
+    if (eg) console.error("[TodayTab] goals:", eg.message);
+    if (em) console.error("[TodayTab] meals:", em.message);
+    if (ea) console.error("[TodayTab] activities:", ea.message);
+
+    applyGoals((gRow ?? null) as Record<string, unknown> | null);
+    setMeals(mapMealsDb(((mRows ?? []) as MealRowDb[])));
+
+    type ActRowDb = {
+      id: string;
+      name: string;
+      kcal_burned: number | null;
+    };
+    setWorkouts(
+      ((aRows ?? []) as ActRowDb[]).map((r) => ({
+        id: r.id,
+        description: typeof r.name === "string" ? r.name : "",
+        caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
       }))
     );
-    const w = readWorkoutsStored(todayKey);
-    setWorkouts(w);
-    setLsHydrated(true);
-  }, [todayKey]);
+
+    await fetchWeekTotals(uid);
+
+    setGoalsLoading(false);
+    setDataLoading(false);
+  }, [applyGoals, todayKey, fetchWeekTotals]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !lsHydrated) return;
-    writeMealsStored(todayKey, meals);
-    const burnSum = workouts.reduce(
-      (s, w0) => s + Math.max(0, w0.caloriesBurned),
-      0
-    );
-    writeBurnTotal(todayKey, burnSum);
-    writeWorkoutsStored(todayKey, workouts);
-  }, [meals, workouts, todayKey, lsHydrated]);
+    void hydrate();
+  }, [hydrate]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function fetchGoals() {
-      setGoalsLoading(true);
-
-      const lg = readGoal();
-      if (lg) {
-        setCalorieGoal(Math.round(lg.calories));
-        setProteinGoal(Math.round(lg.protein));
-        setCarbsGoal(Math.round(lg.carbs));
-        setFatGoal(Math.round(lg.fats));
-        setGoalsLoading(false);
-        return;
-      }
-
-      const supabase = createClient();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user || cancelled) {
-        setGoalsLoading(false);
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from("goals")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      if (cancelled) return;
-
-      if (error) {
-        console.error("[TodayTab] goals fetch:", error.message);
-      }
-
-      const row = (data ?? null) as GoalsRow | null;
-
-      setCalorieGoal(
-        Math.round(
-          rowNumber(
-            row,
-            ["calorie_goal", "calories_goal", "daily_calories", "calories"],
-            TODAY_FALLBACK.calorieGoal
-          )
-        )
-      );
-      setProteinGoal(
-        Math.round(
-          rowNumber(
-            row,
-            ["protein_g", "protein"],
-            TODAY_FALLBACK.proteinGoal
-          )
-        )
-      );
-      setCarbsGoal(
-        Math.round(
-          rowNumber(
-            row,
-            ["carbs_g", "carbs", "carbohydrates"],
-            TODAY_FALLBACK.carbsGoal
-          )
-        )
-      );
-      setFatGoal(
-        Math.round(
-          rowNumber(row, ["fat_g", "fat", "fats"], TODAY_FALLBACK.fatGoal)
-        )
-      );
-      setGoalsLoading(false);
+    function onFocus() {
+      void loadGoalsOnly();
     }
-
-    void fetchGoals();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    function refetchGoals() {
-      const lg = readGoal();
-      if (!lg) return;
-      setCalorieGoal(Math.round(lg.calories));
-      setProteinGoal(Math.round(lg.protein));
-      setCarbsGoal(Math.round(lg.carbs));
-      setFatGoal(Math.round(lg.fats));
-    }
-
-    window.addEventListener("focus", refetchGoals);
-    window.addEventListener("storage", refetchGoals);
-    return () => {
-      window.removeEventListener("focus", refetchGoals);
-      window.removeEventListener("storage", refetchGoals);
-    };
-  }, []);
-
-  useEffect(() => {
-    function bumpWeekChart(e: StorageEvent) {
-      const k = e.key ?? "";
-      if (
-        k.startsWith("fueled_meals_") ||
-        k.startsWith("fueled_workouts_") ||
-        k.startsWith("fueled_burn_") ||
-        k === "fueled_goal"
-      ) {
-        setWeekLsTick((t) => t + 1);
-      }
-    }
-    window.addEventListener("storage", bumpWeekChart);
-    return () => window.removeEventListener("storage", bumpWeekChart);
-  }, []);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadGoalsOnly]);
 
   const totals = useMemo(() => {
     const consumed = meals.reduce((s, m) => s + m.calories, 0);
@@ -261,7 +288,6 @@ export default function TodayTab() {
     const remaining = calorieGoal - consumed + burned;
 
     const overBudget = consumed > budget;
-    const barDenominator = Math.max(calorieGoal, 1);
 
     let barPct: number;
     if (budget > 0) {
@@ -305,15 +331,13 @@ export default function TodayTab() {
 
       if (isToday) {
         consumed = meals.reduce((s, m) => s + Math.max(0, m.calories), 0);
-        burned = workouts.reduce((s, w) => s + Math.max(0, w.caloriesBurned), 0);
-      } else {
-        consumed = readMealsStored(dk).reduce(
-          (s, m) => s + Math.max(0, m.calories),
+        burned = workouts.reduce(
+          (s, w) => s + Math.max(0, w.caloriesBurned),
           0
         );
-        const wo = readWorkoutsStored(dk);
-        burned = wo.reduce((s, w) => s + Math.max(0, w.caloriesBurned), 0);
-        if (burned <= 0) burned = readBurnTotal(dk);
+      } else if (weekAgg[dk]) {
+        consumed = weekAgg[dk].consumed;
+        burned = weekAgg[dk].burned;
       }
 
       const budget = calorieGoal + burned;
@@ -333,7 +357,7 @@ export default function TodayTab() {
     }
 
     return rows;
-  }, [todayKey, meals, workouts, calorieGoal, weekLsTick]);
+  }, [todayKey, meals, workouts, calorieGoal, weekAgg]);
 
   async function handleAddMeal(e: React.FormEvent) {
     e.preventDefault();
@@ -341,6 +365,12 @@ export default function TodayTab() {
 
     const text = mealInput.trim();
     if (!text) return;
+
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
 
     setMealLoading(true);
 
@@ -371,20 +401,43 @@ export default function TodayTab() {
         fat?: number;
       };
 
-      setMeals((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          text,
-          label: typeof parsed.name === "string" ? parsed.name : "Posiłek",
-          calories: typeof parsed.kcal === "number" ? parsed.kcal : 0,
-          protein_g: typeof parsed.protein === "number" ? parsed.protein : 0,
-          carbs_g: typeof parsed.carbs === "number" ? parsed.carbs : 0,
-          fat_g: typeof parsed.fat === "number" ? parsed.fat : 0,
-        },
-      ]);
+      const label =
+        typeof parsed.name === "string" ? parsed.name : "Posiłek";
+
+      const { data: inserted, error } = await supabase
+        .from("meals")
+        .insert({
+          user_id: user.id,
+          date: todayKey,
+          name: label,
+          kcal:
+            typeof parsed.kcal === "number" ? Math.round(parsed.kcal) : 0,
+          protein:
+            typeof parsed.protein === "number" ? Math.round(parsed.protein) : 0,
+          carbs: typeof parsed.carbs === "number" ? Math.round(parsed.carbs) : 0,
+          fat: typeof parsed.fat === "number" ? Math.round(parsed.fat) : 0,
+        })
+        .select("id,name,kcal,protein,carbs,fat")
+        .maybeSingle();
+
+      if (error) {
+        console.error("[TodayTab] meal insert:", error.message);
+        setMealError(error.message);
+        return;
+      }
+
+      const row = inserted as MealRowDb | null;
+      if (row) {
+        const [mapped] = mapMealsDb([row]);
+        if (mapped) {
+          mapped.text = text;
+          mapped.label = label;
+        }
+        setMeals((prev) => [...prev, mapped]);
+      }
 
       setMealInput("");
+      await fetchWeekTotals(user.id);
     } catch {
       setMealError("Brak połączenia lub błąd sieci.");
     } finally {
@@ -392,7 +445,7 @@ export default function TodayTab() {
     }
   }
 
-  function handleAddMealManual(e: React.FormEvent) {
+  async function handleAddMealManual(e: React.FormEvent) {
     e.preventDefault();
     setMealError(null);
 
@@ -414,31 +467,63 @@ export default function TodayTab() {
     const carbs_g = parseGramInput(manualCStr);
     const fat_g = parseGramInput(manualFStr);
 
-    setMeals((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        text: label,
-        label,
-        calories: kcal,
-        protein_g,
-        carbs_g,
-        fat_g,
-      },
-    ]);
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { data: inserted, error } = await supabase
+      .from("meals")
+      .insert({
+        user_id: user.id,
+        date: todayKey,
+        name: label,
+        kcal,
+        protein: protein_g,
+        carbs: carbs_g,
+        fat: fat_g,
+      })
+      .select("id,name,kcal,protein,carbs,fat")
+      .maybeSingle();
+
+    if (error) {
+      console.error("[TodayTab] meal manual:", error.message);
+      setMealError(error.message);
+      return;
+    }
+
+    const row = inserted as MealRowDb | null;
+    if (row) setMeals((prev) => [...prev, ...mapMealsDb([row])]);
 
     setManualLabel("");
     setManualKcalStr("");
     setManualPStr("");
     setManualCStr("");
     setManualFStr("");
+    await fetchWeekTotals(user.id);
   }
 
-  function removeMeal(id: string) {
+  async function removeMeal(id: string) {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+    const { error } = await supabase
+      .from("meals")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", user.id);
+    if (error) {
+      console.error("[TodayTab] meal delete:", error.message);
+      return;
+    }
     setMeals((prev) => prev.filter((m) => m.id !== id));
+    await fetchWeekTotals(user.id);
   }
 
-  function handleAddActivity(e: React.FormEvent) {
+  async function handleAddActivity(e: React.FormEvent) {
     e.preventDefault();
 
     const kcalRaw = Number.parseInt(activityKcal, 10);
@@ -447,13 +532,61 @@ export default function TodayTab() {
 
     if (!description || caloriesBurned <= 0) return;
 
-    setWorkouts((prev) => [...prev, { id: crypto.randomUUID(), description, caloriesBurned }]);
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { data: inserted, error } = await supabase
+      .from("activities")
+      .insert({
+        user_id: user.id,
+        date: todayKey,
+        name: description,
+        kcal_burned: caloriesBurned,
+      })
+      .select("id,name,kcal_burned")
+      .maybeSingle();
+
+    if (error) {
+      console.error("[TodayTab] activity insert:", error.message);
+      return;
+    }
+
+    const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
+    if (r) {
+      setWorkouts((prev) => [
+        ...prev,
+        {
+          id: r.id,
+          description: r.name,
+          caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+        },
+      ]);
+    }
     setActivityText("");
     setActivityKcal("");
+    await fetchWeekTotals(user.id);
   }
 
-  function removeActivity(id: string) {
+  async function removeActivity(id: string) {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+    const { error } = await supabase
+      .from("activities")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", user.id);
+    if (error) {
+      console.error("[TodayTab] activity delete:", error.message);
+      return;
+    }
     setWorkouts((prev) => prev.filter((w) => w.id !== id));
+    await fetchWeekTotals(user.id);
   }
 
   const remainingLabel =
@@ -466,8 +599,8 @@ export default function TodayTab() {
 
   return (
     <div className="flex flex-col gap-5 text-white">
-      {goalsLoading ? (
-        <p className="text-center text-xs text-white/45">Ładowanie celów...</p>
+      {goalsLoading || dataLoading ? (
+        <p className="text-center text-xs text-white/45">Ładowanie...</p>
       ) : null}
 
       <section>
@@ -588,7 +721,7 @@ export default function TodayTab() {
           </button>
         </div>
         {mealEntryMode === "ai" ? (
-          <form onSubmit={handleAddMeal} className="space-y-3">
+          <form onSubmit={(e) => void handleAddMeal(e)} className="space-y-3">
             <div className="flex gap-2">
               <input
                 type="text"
@@ -616,7 +749,7 @@ export default function TodayTab() {
             </button>
           </form>
         ) : (
-          <form onSubmit={handleAddMealManual} className="space-y-3">
+          <form onSubmit={(e) => void handleAddMealManual(e)} className="space-y-3">
             <input
               type="text"
               value={manualLabel}
@@ -689,7 +822,7 @@ export default function TodayTab() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => removeMeal(m.id)}
+                  onClick={() => void removeMeal(m.id)}
                   className="shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-red-400 hover:bg-white/10"
                   aria-label="Usuń posiłek"
                 >
@@ -705,7 +838,7 @@ export default function TodayTab() {
         <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/80">
           AKTYWNOŚĆ
         </h2>
-        <form onSubmit={handleAddActivity} className="space-y-3">
+        <form onSubmit={(e) => void handleAddActivity(e)} className="space-y-3">
           <div className="flex items-start gap-2">
             <textarea
               rows={5}
@@ -759,7 +892,7 @@ export default function TodayTab() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => removeActivity(w.id)}
+                  onClick={() => void removeActivity(w.id)}
                   className="shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-red-400 hover:bg-white/10"
                   aria-label="Usuń aktywność"
                 >

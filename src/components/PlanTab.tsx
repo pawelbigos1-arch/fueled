@@ -1,16 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { PlanMeal, StoredMeal } from "@/lib/fueled-storage";
-import {
-  addDays,
-  appendMeal,
-  formatDateKey,
-  parseDateKey,
-  readPlan,
-  resolveGoal,
-  writePlan,
-} from "@/lib/fueled-storage";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { PlanMeal } from "@/lib/fueled-storage";
+import { addDays, formatDateKey, parseDateKey } from "@/lib/fueled-storage";
+import { DEFAULT_GOAL_LS } from "@/lib/fueled-storage";
+import { createClient } from "@/lib/supabase";
 import VoiceDictationButton from "@/components/VoiceDictationButton";
 
 function parseGramInput(raw: string): number {
@@ -22,19 +16,52 @@ function cardCls() {
   return "rounded-xl border border-[#2A2A2A] bg-[#1E1E1E] p-3";
 }
 
-export default function PlanTab() {
-  const [goal, setGoal] = useState(resolveGoal());
+/** Zgodnie ze schematem JSON w meal_plans */
+type PlanMealJson = {
+  id: string;
+  name: string;
+  kcal: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  confirmed: boolean;
+};
 
-  useEffect(() => {
-    const onStorage = () => setGoal(resolveGoal());
-    window.addEventListener("storage", onStorage);
-    const onFocus = () => setGoal(resolveGoal());
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", onFocus);
+function planMealsToJson(meals: PlanMeal[]): PlanMealJson[] {
+  return meals.map((pm) => ({
+    id: pm.id,
+    name: pm.label || pm.text,
+    kcal: pm.calories,
+    protein: pm.protein_g,
+    carbs: pm.carbs_g,
+    fat: pm.fat_g,
+    confirmed: pm.eaten,
+  }));
+}
+
+function jsonToPlanMeals(raw: unknown): PlanMeal[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((x) => {
+    const row = x as Partial<PlanMealJson>;
+    const name =
+      typeof row.name === "string" ? row.name : "Plan";
+    return {
+      id: typeof row.id === "string" ? row.id : crypto.randomUUID(),
+      text: name,
+      label: name,
+      calories: Math.round(Number(row.kcal) || 0),
+      protein_g: Math.round(Number(row.protein) || 0),
+      carbs_g: Math.round(Number(row.carbs) || 0),
+      fat_g: Math.round(Number(row.fat) || 0),
+      eaten: Boolean(row.confirmed),
     };
-  }, []);
+  });
+}
+
+export default function PlanTab() {
+  const [goal, setGoal] = useState({ calories: DEFAULT_GOAL_LS.calories });
+  const [goalLoading, setGoalLoading] = useState(true);
+  const [planLoading, setPlanLoading] = useState(true);
 
   const [day, setDay] = useState(() =>
     formatDateKey(addDays(new Date(), 1))
@@ -53,15 +80,105 @@ export default function PlanTab() {
   const [manualCStr, setManualCStr] = useState("");
   const [manualFStr, setManualFStr] = useState("");
 
-  useEffect(() => {
-    const p = readPlan(day);
-    setPlan((p.meals as PlanMeal[]) ?? []);
+  const hydrateGoal = useCallback(async () => {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      setGoal({ calories: DEFAULT_GOAL_LS.calories });
+      setGoalLoading(false);
+      return;
+    }
+    const { data, error } = await supabase
+      .from("goals")
+      .select("kcal")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (error) console.error("[PlanTab] goals:", error.message);
+
+    const k = Number((data as { kcal?: number } | null)?.kcal);
+    setGoal({
+      calories: Number.isFinite(k) && k > 0 ? Math.round(k) : DEFAULT_GOAL_LS.calories,
+    });
+    setGoalLoading(false);
+  }, []);
+
+  const loadPlanForDay = useCallback(async () => {
+    setPlanLoading(true);
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      setPlan([]);
+      setPlanLoading(false);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("meal_plans")
+      .select("meals,status")
+      .eq("user_id", user.id)
+      .eq("date", day)
+      .maybeSingle();
+
+    if (error) {
+      console.error("[PlanTab] meal_plans load:", error.message);
+      setPlan([]);
+    } else {
+      setPlan(jsonToPlanMeals((data as { meals?: unknown })?.meals));
+    }
+
+    setPlanLoading(false);
   }, [day]);
 
-  const persist = (next: PlanMeal[]) => {
+  useEffect(() => {
+    void hydrateGoal();
+  }, [hydrateGoal]);
+
+  useEffect(() => {
+    void loadPlanForDay();
+  }, [loadPlanForDay]);
+
+  useEffect(() => {
+    function onFocus() {
+      void hydrateGoal();
+    }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [hydrateGoal]);
+
+  async function persistToSupabase(next: PlanMeal[]) {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const allDone =
+      next.length > 0 && next.every((m) => m.eaten);
+
+    const { error } = await supabase.from("meal_plans").upsert(
+      {
+        user_id: user.id,
+        date: day,
+        meals: planMealsToJson(next),
+        status: allDone ? "confirmed" : "draft",
+      },
+      { onConflict: "user_id,date" }
+    );
+
+    if (error) {
+      console.error("[PlanTab] meal_plans upsert:", error.message);
+    }
+  }
+
+  async function persist(next: PlanMeal[]) {
     setPlan(next);
-    writePlan(day, { meals: next });
-  };
+    await persistToSupabase(next);
+  }
 
   const totals = useMemo(() => {
     const planned = plan.reduce(
@@ -110,6 +227,12 @@ export default function PlanTab() {
     const text = inputText.trim();
     if (!text) return;
 
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
     setLoading(true);
     setParseError(null);
 
@@ -148,7 +271,8 @@ export default function PlanTab() {
         eaten: false,
       };
 
-      persist([...plan, meal]);
+      const next = [...plan, meal];
+      await persist(next);
       setInputText("");
     } catch {
       setParseError("Błąd sieci");
@@ -157,7 +281,7 @@ export default function PlanTab() {
     }
   }
 
-  function addManualToPlan(e: React.FormEvent) {
+  async function addManualToPlan(e: React.FormEvent) {
     e.preventDefault();
     setParseError(null);
 
@@ -190,7 +314,7 @@ export default function PlanTab() {
       eaten: false,
     };
 
-    persist([...plan, meal]);
+    await persist([...plan, meal]);
     setManualLabel("");
     setManualKcalStr("");
     setManualPStr("");
@@ -198,26 +322,36 @@ export default function PlanTab() {
     setManualFStr("");
   }
 
-  function markAte(mid: string) {
-    const next = plan.map((m) =>
-      m.id === mid ? { ...m, eaten: true } : m
-    );
-    persist(next);
+  async function markAte(mid: string) {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
 
     const meal = plan.find((m) => m.id === mid);
     if (!meal || meal.eaten) return;
 
-    const stored: StoredMeal = {
-      id: meal.id,
-      text: meal.text,
-      label: meal.label,
-      calories: meal.calories,
-      protein_g: meal.protein_g,
-      carbs_g: meal.carbs_g,
-      fat_g: meal.fat_g,
-    };
+    const nextPlan = plan.map((m) =>
+      m.id === mid ? { ...m, eaten: true } : m
+    );
 
-    appendMeal(day, stored);
+    const { error: insErr } = await supabase.from("meals").insert({
+      user_id: user.id,
+      date: day,
+      name: meal.label || meal.text,
+      kcal: meal.calories,
+      protein: meal.protein_g,
+      carbs: meal.carbs_g,
+      fat: meal.fat_g,
+    });
+
+    if (insErr) {
+      console.error("[PlanTab] confirm → meals:", insErr.message);
+      return;
+    }
+
+    await persist(nextPlan);
   }
 
   const badge = totals.allConfirmed
@@ -241,6 +375,10 @@ export default function PlanTab() {
 
   return (
     <div className="flex flex-col gap-5 text-white">
+      {goalLoading || planLoading ? (
+        <p className="text-center text-xs text-white/45">Ładowanie...</p>
+      ) : null}
+
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
@@ -372,7 +510,7 @@ export default function PlanTab() {
                 <button
                   type="button"
                   disabled={m.eaten}
-                  onClick={() => markAte(m.id)}
+                  onClick={() => void markAte(m.id)}
                   className="shrink-0 rounded-xl border border-white/25 px-4 py-2 text-xs font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   ✓ Zjadłem
@@ -422,7 +560,7 @@ export default function PlanTab() {
         </button>
       </div>
       {planEntryMode === "ai" ? (
-        <form onSubmit={addFromParse} className="space-y-3">
+        <form onSubmit={(e) => void addFromParse(e)} className="space-y-3">
           <p className="text-[11px] leading-snug text-white/40">
             <strong className="text-white/55">Mów</strong> podpowie tekst; potem Dodaj do planu —
             makra z AI.
@@ -453,7 +591,7 @@ export default function PlanTab() {
           </button>
         </form>
       ) : (
-        <form onSubmit={addManualToPlan} className="space-y-3">
+        <form onSubmit={(e) => void addManualToPlan(e)} className="space-y-3">
           <p className="text-[11px] leading-snug text-white/40">
             Wpisz kalorie z etykiety lub własnych notatek; makra opcjonalne.
           </p>

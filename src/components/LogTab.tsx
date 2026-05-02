@@ -1,24 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   EXERCISE_CATEGORIES,
   mergeDictWithDefaults,
-  type DictExercise,
   type DictStore,
   type ExerciseCategory,
 } from "@/lib/exercise-catalog";
 import { LS_DICT } from "@/lib/fueled-storage";
 import type { LogEntry, LogSet } from "@/lib/fueled-storage";
-import {
-  addDays,
-  formatDateKey,
-  parseDateKey,
-  readLogEntries,
-  readMealsStored,
-  readPlan,
-  writeLogEntries,
-} from "@/lib/fueled-storage";
+import { addDays, formatDateKey, parseDateKey } from "@/lib/fueled-storage";
+import { createClient } from "@/lib/supabase";
 import {
   parseKey,
   type StatsRange,
@@ -56,6 +48,45 @@ function loadDict(): DictStore {
 
 function saveDict(d: DictStore) {
   localStorage.setItem(LS_DICT, JSON.stringify(d));
+}
+
+function setsToJsonDb(sets: LogSet[]): { reps: number; weight: number; series?: number }[] {
+  return sets.map((s) => ({
+    reps: s.reps,
+    weight: s.weight,
+    series: s.series,
+  }));
+}
+
+function setsFromJsonDb(raw: unknown): LogSet[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const x = item as { reps?: number; weight?: number; series?: number };
+    const series = Math.max(1, Math.round(Number(x.series) || 1));
+    return {
+      reps: Math.round(Number(x.reps) || 0),
+      weight: Number.isFinite(Number(x.weight)) ? Number(x.weight) : 0,
+      series,
+    };
+  });
+}
+
+type WorkoutRowDb = {
+  id: string;
+  date: string;
+  exercise: string;
+  category: string;
+  sets: unknown;
+};
+
+function rowToEntry(r: WorkoutRowDb): LogEntry {
+  return {
+    id: r.id,
+    date: r.date,
+    exercise: r.exercise,
+    category: r.category,
+    sets: setsFromJsonDb(r.sets),
+  };
 }
 
 function chipLabel(s: LogSet, repsMode: boolean): string {
@@ -122,22 +153,151 @@ export default function LogTab() {
   const [dictNewName, setDictNewName] = useState("");
   const [dictCategory, setDictCategory] = useState<ExerciseCategory>("Klatka");
 
+  /** Ostatnie 56 dni: liczba posiłków wg daty — do podglądu historii */
+  const [mealCountByDate, setMealCountByDate] = useState<
+    Record<string, number>
+  >({});
+  /** Ostatnie 90 dni: podpowiedź kalendarza */
+  const [datesWithWorkouts, setDatesWithWorkouts] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [datesWithMeals, setDatesWithMeals] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [datesWithPlan, setDatesWithPlan] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [dataReady, setDataReady] = useState(false);
+
+  const reloadWorkoutLogs = useCallback(async () => {
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) {
+      setLogs([]);
+      return;
+    }
+    const cutoff = formatDateKey(addDays(new Date(), -800));
+    const { data, error } = await sb
+      .from("workout_log")
+      .select("id,date,exercise,category,sets")
+      .eq("user_id", user.id)
+      .gte("date", cutoff)
+      .order("date", { ascending: false })
+      .limit(2000);
+
+    if (error) {
+      console.error("[LogTab] workout_log:", error.message);
+      setLogs([]);
+      return;
+    }
+    setLogs(((data ?? []) as WorkoutRowDb[]).map(rowToEntry));
+  }, []);
+
+  const reloadCalendarMarks = useCallback(async () => {
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) return;
+
+    const start = formatDateKey(addDays(new Date(), -90));
+    const end = formatDateKey(new Date());
+
+    const [{ data: wDates, error: ew }, { data: mDates, error: em }, { data: planRows, error: ep }] =
+      await Promise.all([
+        sb
+          .from("workout_log")
+          .select("date")
+          .eq("user_id", user.id)
+          .gte("date", start)
+          .lte("date", end),
+        sb
+          .from("meals")
+          .select("date")
+          .eq("user_id", user.id)
+          .gte("date", start)
+          .lte("date", end),
+        sb
+          .from("meal_plans")
+          .select("date,meals")
+          .eq("user_id", user.id)
+          .gte("date", start)
+          .lte("date", end),
+      ]);
+
+    if (ew) console.error("[LogTab] calendar workouts:", ew.message);
+    if (em) console.error("[LogTab] calendar meals:", em.message);
+    if (ep) console.error("[LogTab] calendar plans:", ep.message);
+
+    setDatesWithWorkouts(
+      new Set((wDates ?? []).map((r: { date: string }) => r.date).filter(Boolean))
+    );
+    setDatesWithMeals(
+      new Set((mDates ?? []).map((r: { date: string }) => r.date).filter(Boolean))
+    );
+
+    const planDates = new Set<string>();
+    for (const row of planRows ?? []) {
+      const r = row as { date?: string; meals?: unknown };
+      if (!r.date) continue;
+      const meals = Array.isArray(r.meals) ? r.meals : [];
+      if (meals.length > 0) planDates.add(r.date);
+    }
+    setDatesWithPlan(planDates);
+  }, []);
+
+  const reloadMealCountsForHistory = useCallback(async () => {
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) {
+      setMealCountByDate({});
+      return;
+    }
+    const start = formatDateKey(addDays(new Date(), -56));
+    const end = formatDateKey(new Date());
+    const { data, error } = await sb
+      .from("meals")
+      .select("date")
+      .eq("user_id", user.id)
+      .gte("date", start)
+      .lte("date", end);
+
+    if (error) {
+      console.error("[LogTab] meal counts:", error.message);
+      return;
+    }
+
+    const tally: Record<string, number> = {};
+    ((data ?? []) as { date: string }[]).forEach(({ date }) => {
+      if (!date) return;
+      tally[date] = (tally[date] ?? 0) + 1;
+    });
+    setMealCountByDate(tally);
+  }, []);
+
   useEffect(() => {
     setMounted(true);
-    try {
-      setLogs(readLogEntries());
-      setDict(loadDict());
-    } catch {}
-  }, []);
+    setDict(loadDict());
+
+    async function hydrate() {
+      setDataReady(false);
+      await Promise.all([
+        reloadWorkoutLogs(),
+        reloadCalendarMarks(),
+        reloadMealCountsForHistory(),
+      ]);
+      setDataReady(true);
+    }
+    void hydrate();
+  }, [reloadWorkoutLogs, reloadCalendarMarks, reloadMealCountsForHistory]);
 
   useEffect(() => {
     if (exerciseUsesReps(dict, category, exerciseSel)) setWStr("");
   }, [dict, category, exerciseSel]);
-
-  const persistLogs = (next: LogEntry[]) => {
-    setLogs(next);
-    writeLogEntries(next);
-  };
 
   const persistDict = (next: DictStore) => {
     const merged = mergeDictWithDefaults(next);
@@ -225,7 +385,7 @@ export default function LogTab() {
     for (let offset = 0; offset < 56 && rows.length < 7; offset += 1) {
       const dk = formatDateKey(addDays(new Date(), -offset));
       const workCount = logs.filter((l) => l.date === dk).length;
-      const mealsCount = readMealsStored(dk).length;
+      const mealsCount = mealCountByDate[dk] ?? 0;
       if (!workCount && !mealsCount) continue;
 
       rows.push(
@@ -233,7 +393,7 @@ export default function LogTab() {
       );
     }
     return rows;
-  }, [logs]);
+  }, [logs, mealCountByDate]);
 
   const exerciseRepsMode = useMemo(
     () => exerciseUsesReps(dict, category, exerciseSel),
@@ -291,34 +451,50 @@ export default function LogTab() {
     setChips((c) => [...c, chipLabel(setObj, repsMode)]);
   }
 
-  function saveExerciseDay() {
+  async function saveExerciseDay() {
     if (!exerciseSel || chipSets.length === 0) return;
 
-    persistLogs([
-      ...logs,
-      {
-        id: crypto.randomUUID(),
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) return;
+
+    const { data, error } = await sb
+      .from("workout_log")
+      .insert({
+        user_id: user.id,
         date: dailyDateKey,
         exercise: exerciseSel,
         category,
-        sets: chipSets,
-      },
-    ]);
+        sets: setsToJsonDb(chipSets),
+      })
+      .select("id,date,exercise,category,sets")
+      .maybeSingle();
+
+    if (error) {
+      console.error("[LogTab] workout insert:", error.message);
+      return;
+    }
+
+    const row = data as WorkoutRowDb | null;
+    if (row) setLogs((prev) => [rowToEntry(row), ...prev]);
 
     setChips([]);
     setChipSets([]);
     setWStr("");
     setRepStr("");
     setSerieStr("");
+
+    await reloadCalendarMarks();
   }
 
   /** --- calendar cell styles --- */
 
   function cellMeta(dk: string) {
-    const hasWork = logs.some((l) => l.date === dk);
-    const mealsPlan = readPlan(dk).meals;
-    const hasPlan = Array.isArray(mealsPlan) && mealsPlan.length > 0;
-    const hasEat = readMealsStored(dk).length > 0;
+    const hasWork = datesWithWorkouts.has(dk) || logs.some((l) => l.date === dk);
+    const hasPlan = datesWithPlan.has(dk);
+    const hasEat = datesWithMeals.has(dk);
     return { hasWork, hasPlan, hasEat };
   }
 
@@ -326,7 +502,7 @@ export default function LogTab() {
 
   /** --- renders --- */
 
-  if (!mounted) {
+  if (!mounted || !dataReady) {
     return (
       <p className="py-8 text-center text-sm text-white/45">Ładowanie…</p>
     );
@@ -715,7 +891,7 @@ export default function LogTab() {
           </button>
           <button
             type="button"
-            onClick={saveExerciseDay}
+            onClick={() => void saveExerciseDay()}
             className="touch-manipulation min-h-[52px] w-full rounded-[12px] border border-[#EF9F27]/55 bg-[#EF9F27]/20 py-3 text-[15px] font-bold text-[#fff2e8] active:opacity-90 hover:bg-[#EF9F27]/30"
           >
             Zapisz ćwiczenie

@@ -1,12 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  DEFAULT_GOAL_LS,
-  readGoal,
-  writeGoal,
-  type GoalStorage,
-} from "@/lib/fueled-storage";
+import { useCallback, useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase";
+import type { GoalStorage } from "@/lib/fueled-storage";
+import { DEFAULT_GOAL_LS } from "@/lib/fueled-storage";
 
 function Field({
   label,
@@ -42,15 +39,50 @@ function Field({
 }
 
 export default function GoalTab() {
-  const init = (): GoalStorage => readGoal() ?? DEFAULT_GOAL_LS;
-  const [form, setForm] = useState<GoalStorage>(init);
+  const [form, setForm] = useState<GoalStorage>(DEFAULT_GOAL_LS);
+  const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(false);
 
-  useEffect(() => {
+  const hydrate = useCallback(async () => {
+    setLoading(true);
     try {
-      setForm(readGoal() ?? DEFAULT_GOAL_LS);
-    } catch {}
+      const supabase = createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setForm(DEFAULT_GOAL_LS);
+        return;
+      }
+      const { data, error } = await supabase
+        .from("goals")
+        .select("*")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error("[GoalTab] goals:", error.message);
+      }
+
+      const row = (data ?? null) as Record<string, unknown> | null;
+      if (!row || typeof row.kcal !== "number") {
+        setForm(DEFAULT_GOAL_LS);
+      } else {
+        setForm({
+          calories: Math.round(Number(row.kcal)),
+          protein: Math.round(Number(row.protein ?? 0)),
+          carbs: Math.round(Number(row.carbs ?? 0)),
+          fats: Math.round(Number(row.fat ?? 0)),
+        });
+      }
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void hydrate();
+  }, [hydrate]);
 
   useEffect(() => {
     if (!toast) return;
@@ -67,10 +99,34 @@ export default function GoalTab() {
     setForm((f) => ({ ...f, [key]: Math.max(0, Math.round(n)) }));
   }
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    writeGoal(form);
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const now = new Date().toISOString();
+    const { error } = await supabase.from("goals").upsert(
+      {
+        user_id: user.id,
+        kcal: form.calories,
+        protein: form.protein,
+        carbs: form.carbs,
+        fat: form.fats,
+        updated_at: now,
+      },
+      { onConflict: "user_id" }
+    );
+
+    if (error) {
+      console.error("[GoalTab] upsert:", error.message);
+      return;
+    }
+
     setToast(true);
+    void hydrate();
   }
 
   return (
@@ -85,38 +141,42 @@ export default function GoalTab() {
         Cel dzienny
       </h2>
 
-      <form onSubmit={submit} className="space-y-4">
-        <Field
-          label="Kalorie"
-          suffix="kcal"
-          value={String(form.calories)}
-          onChange={(raw) => patch("calories", raw)}
-        />
-        <Field
-          label="Białko"
-          suffix="g"
-          value={String(form.protein)}
-          onChange={(raw) => patch("protein", raw)}
-        />
-        <Field
-          label="Węglowodany"
-          suffix="g"
-          value={String(form.carbs)}
-          onChange={(raw) => patch("carbs", raw)}
-        />
-        <Field
-          label="Tłuszcze"
-          suffix="g"
-          value={String(form.fats)}
-          onChange={(raw) => patch("fats", raw)}
-        />
-        <button
-          type="submit"
-          className="w-full rounded-xl bg-[#3B6D11] py-3 text-sm font-bold text-white hover:brightness-110 active:brightness-95"
-        >
-          Zapisz cel
-        </button>
-      </form>
+      {loading ? (
+        <p className="text-center text-xs text-white/45">Ładowanie...</p>
+      ) : (
+        <form onSubmit={(e) => void submit(e)} className="space-y-4">
+          <Field
+            label="Kalorie"
+            suffix="kcal"
+            value={String(form.calories)}
+            onChange={(raw) => patch("calories", raw)}
+          />
+          <Field
+            label="Białko"
+            suffix="g"
+            value={String(form.protein)}
+            onChange={(raw) => patch("protein", raw)}
+          />
+          <Field
+            label="Węglowodany"
+            suffix="g"
+            value={String(form.carbs)}
+            onChange={(raw) => patch("carbs", raw)}
+          />
+          <Field
+            label="Tłuszcze"
+            suffix="g"
+            value={String(form.fats)}
+            onChange={(raw) => patch("fats", raw)}
+          />
+          <button
+            type="submit"
+            className="w-full rounded-xl bg-[#3B6D11] py-3 text-sm font-bold text-white hover:brightness-110 active:brightness-95"
+          >
+            Zapisz cel
+          </button>
+        </form>
+      )}
     </div>
   );
 }

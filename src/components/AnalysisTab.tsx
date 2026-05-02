@@ -1,18 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { StoredMeal } from "@/lib/fueled-storage";
-import {
-  addDays,
-  formatDateKey,
-  parseDateKey,
-  readBurnTotal,
-  readMealsStored,
-  readWeightStore,
-  writeWeightStore,
-  type WeightStorage,
-  type WeightDay,
-} from "@/lib/fueled-storage";
+import { addDays, formatDateKey, parseDateKey } from "@/lib/fueled-storage";
+import { createClient } from "@/lib/supabase";
 import type { StatsRange } from "@/lib/date-range";
 import {
   enumerateDays,
@@ -45,6 +36,28 @@ const pill =
 
 const sectionCap =
   "text-[10px] font-semibold uppercase tracking-[0.22em] text-white/52";
+
+function mapMealRow(r: {
+  id: string;
+  name: string | null;
+  kcal: number | null;
+  protein: number | null;
+  carbs: number | null;
+  fat: number | null;
+  date?: string;
+}): StoredMeal & { date?: string } {
+  const name = typeof r.name === "string" && r.name.trim() ? r.name : "Posiłek";
+  return {
+    id: r.id,
+    text: name,
+    label: name,
+    calories: Math.max(0, Math.round(Number(r.kcal) || 0)),
+    protein_g: Math.max(0, Math.round(Number(r.protein) || 0)),
+    carbs_g: Math.max(0, Math.round(Number(r.carbs) || 0)),
+    fat_g: Math.max(0, Math.round(Number(r.fat) || 0)),
+    date: r.date,
+  };
+}
 
 function sumMealsKcal(ml: StoredMeal[]): number {
   return ml.reduce((s, m) => s + Math.max(0, m.calories), 0);
@@ -96,11 +109,13 @@ function FoodCal({
   setMonth,
   picked,
   onPick,
+  mealDatesPresent,
 }: {
   month: Date;
   setMonth: (d: Date) => void;
   picked: string;
   onPick: (dk: string) => void;
+  mealDatesPresent: Set<string>;
 }) {
   const y = month.getFullYear();
   const mo = month.getMonth();
@@ -117,7 +132,7 @@ function FoodCal({
   });
 
   function hasMeals(dk: string) {
-    return readMealsStored(dk).length > 0;
+    return mealDatesPresent.has(dk);
   }
 
   return (
@@ -321,8 +336,26 @@ function WeightBodyPane({
   );
 }
 
-export default function AnalysisTab() {
+/** Grupuje posiłki po dacie w Mapę dk -> StoredMeal[] */
+function bucketMeals(
+  rows: Array<
+    StoredMeal & {
+      date: string;
+    }
+  >
+): Map<string, StoredMeal[]> {
+  const map = new Map<string, StoredMeal[]>();
+  rows.forEach((r) => {
+    const dk = r.date;
+    if (!dk) return;
+    const { date: _omit, ...rest } = r;
+    const meal: StoredMeal = rest as StoredMeal;
+    map.set(dk, [...(map.get(dk) ?? []), meal]);
+  });
+  return map;
+}
 
+export default function AnalysisTab() {
   const [mounted, setMounted] = useState(false);
 
   /** diet */
@@ -334,6 +367,31 @@ export default function AnalysisTab() {
   );
   const [calMonth, setCalMonth] = useState(() => new Date());
 
+  const [mealsByDate, setMealsByDate] = useState<Map<string, StoredMeal[]>>(
+    () => new Map()
+  );
+  const [weightKgByDateDietWindow, setWeightKgByDateDietWindow] = useState<
+    Map<string, number>
+  >(() => new Map());
+
+  const [activityBurnByDate, setActivityBurnByDate] = useState<
+    Map<string, number>
+  >(() => new Map());
+  const [calendarMonthMealDates, setCalendarMonthMealDates] = useState<
+    Set<string>
+  >(() => new Set());
+
+  const [bodyRowsByDate, setBodyRowsByDate] = useState<
+    Map<
+      string,
+      { weight?: number; fat?: number; muscle?: number }
+    >
+  >(() => new Map());
+
+  const [todayBodyLoading, setTodayBodyLoading] = useState(false);
+  const [dietLoading, setDietLoading] = useState(true);
+  const [bodyWideLoading, setBodyWideLoading] = useState(true);
+
   /** weight */
   const [wm, setWeightMetric] = useState<"weight" | "fat" | "muscle">(
     "weight"
@@ -343,17 +401,274 @@ export default function AnalysisTab() {
   const [fatInp, setFatInp] = useState("");
   const [musInp, setMusInp] = useState("");
 
+  const reloadDietWindow = useCallback(async () => {
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    const end = new Date();
+    const start = startDateForRange(dietRange, end);
+    const dateStart = formatDateKey(start);
+    const dateEnd = formatDateKey(end);
+
+    if (!user) {
+      setMealsByDate(new Map());
+      setWeightKgByDateDietWindow(new Map());
+      setActivityBurnByDate(new Map());
+      setDietLoading(false);
+      return;
+    }
+
+    setDietLoading(true);
+    const [
+      { data: mRows, error: em },
+      { data: aRows, error: ea },
+      { data: bRows, error: eb },
+    ] =
+      await Promise.all([
+        sb
+          .from("meals")
+          .select("id,name,kcal,protein,carbs,fat,date")
+          .eq("user_id", user.id)
+          .gte("date", dateStart)
+          .lte("date", dateEnd),
+        sb
+          .from("activities")
+          .select("date,kcal_burned")
+          .eq("user_id", user.id)
+          .gte("date", dateStart)
+          .lte("date", dateEnd),
+        sb
+          .from("body_metrics")
+          .select("date,weight_kg")
+          .eq("user_id", user.id)
+          .gte("date", dateStart)
+          .lte("date", dateEnd),
+      ]);
+
+    if (em) console.error("[AnalysisTab] meals range:", em.message);
+    if (ea) console.error("[AnalysisTab] activities range:", ea.message);
+    if (eb) console.error("[AnalysisTab] body (diet window):", eb.message);
+
+    const wMap = new Map<string, number>();
+    (
+      (bRows ?? []) as {
+        date: string;
+        weight_kg: number | null;
+      }[]
+    ).forEach(({ date, weight_kg }) => {
+      if (!date || typeof weight_kg !== "number" || !Number.isFinite(weight_kg))
+        return;
+      wMap.set(date, Math.round(weight_kg * 10) / 10);
+    });
+    setWeightKgByDateDietWindow(wMap);
+
+    const mealsRaw = ((mRows ?? []) as {
+      id: string;
+      name: string | null;
+      date: string;
+      kcal: number | null;
+      protein: number | null;
+      carbs: number | null;
+      fat: number | null;
+    }[]).map((r) => ({
+      ...mapMealRow(r),
+      date: r.date,
+    }));
+
+    const burnMap = new Map<string, number>();
+    (
+      (aRows ?? []) as { date: string; kcal_burned: number | null }[]
+    ).forEach(({ date, kcal_burned }) => {
+      if (!date) return;
+      burnMap.set(
+        date,
+        (burnMap.get(date) ?? 0) +
+          Math.max(0, Math.round(Number(kcal_burned) || 0))
+      );
+    });
+
+    setMealsByDate(bucketMeals(mealsRaw as (StoredMeal & { date: string })[]));
+    setActivityBurnByDate(burnMap);
+    setDietLoading(false);
+  }, [dietRange]);
+
+  const reloadCalendarMealDots = useCallback(async () => {
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) {
+      setCalendarMonthMealDates(new Set());
+      return;
+    }
+
+    const y = calMonth.getFullYear();
+    const mo = calMonth.getMonth();
+    const first = `${y}-${String(mo + 1).padStart(2, "0")}-01`;
+    const lastDt = new Date(y, mo + 1, 0);
+    const last = `${y}-${String(mo + 1).padStart(2, "0")}-${String(
+      lastDt.getDate()
+    ).padStart(2, "0")}`;
+
+    const { data, error } = await sb
+      .from("meals")
+      .select("date")
+      .eq("user_id", user.id)
+      .gte("date", first)
+      .lte("date", last);
+
+    if (error) {
+      console.error("[AnalysisTab] calendar meals:", error.message);
+      return;
+    }
+
+    setCalendarMonthMealDates(
+      new Set(
+        ((data ?? []) as { date: string }[])
+          .map((x) => x.date)
+          .filter(Boolean)
+      )
+    );
+  }, [calMonth]);
+
+  const reloadBodyForRange = useCallback(async () => {
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    const end = new Date();
+    const start = startDateForRange(wRange, end);
+
+    if (!user) {
+      setBodyRowsByDate(new Map());
+      setBodyWideLoading(false);
+      return;
+    }
+
+    setBodyWideLoading(true);
+
+    const { data, error } = await sb
+      .from("body_metrics")
+      .select("*")
+      .eq("user_id", user.id)
+      .gte("date", formatDateKey(start))
+      .lte("date", formatDateKey(end))
+      .order("date", { ascending: true });
+
+    if (error) {
+      console.error("[AnalysisTab] body_metrics:", error.message);
+      setBodyWideLoading(false);
+      return;
+    }
+
+    const m = new Map<
+      string,
+      { weight?: number; fat?: number; muscle?: number }
+    >();
+    (
+      (data ?? []) as {
+        date: string;
+        weight_kg: number | null;
+        fat_pct: number | null;
+        muscle_kg: number | null;
+      }[]
+    ).forEach((r) => {
+      if (!r.date) return;
+      const obj: {
+        weight?: number;
+        fat?: number;
+        muscle?: number;
+      } = {};
+      if (
+        typeof r.weight_kg === "number" &&
+        Number.isFinite(r.weight_kg)
+      ) {
+        obj.weight = Math.round(r.weight_kg * 10) / 10;
+      }
+      if (typeof r.fat_pct === "number" && Number.isFinite(r.fat_pct)) {
+        obj.fat = Math.round(r.fat_pct * 10) / 10;
+      }
+      if (
+        typeof r.muscle_kg === "number" &&
+        Number.isFinite(r.muscle_kg)
+      ) {
+        obj.muscle = Math.round(r.muscle_kg * 10) / 10;
+      }
+      m.set(r.date, obj);
+    });
+    setBodyRowsByDate(m);
+    setBodyWideLoading(false);
+  }, [wRange]);
+
+  const loadTodayInputs = useCallback(async () => {
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    const tk = formatDateKey(new Date());
+
+    setTodayBodyLoading(true);
+    setWInp("");
+    setFatInp("");
+    setMusInp("");
+
+    if (!user) {
+      setTodayBodyLoading(false);
+      return;
+    }
+
+    const { data, error } = await sb
+      .from("body_metrics")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("date", tk)
+      .maybeSingle();
+
+    if (error) {
+      console.error("[AnalysisTab] today body_metrics:", error.message);
+    }
+
+    const row = data as {
+      weight_kg?: number | null;
+      fat_pct?: number | null;
+      muscle_kg?: number | null;
+    } | null;
+
+    if (row?.weight_kg != null && Number.isFinite(Number(row.weight_kg))) {
+      setWInp(String(Math.round(Number(row.weight_kg) * 10) / 10));
+    }
+    if (row?.fat_pct != null && Number.isFinite(Number(row.fat_pct))) {
+      setFatInp(String(Math.round(Number(row.fat_pct) * 10) / 10));
+    }
+    if (row?.muscle_kg != null && Number.isFinite(Number(row.muscle_kg))) {
+      setMusInp(String(Math.round(Number(row.muscle_kg) * 10) / 10));
+    }
+
+    setTodayBodyLoading(false);
+  }, []);
+
   useEffect(() => {
     setMounted(true);
-    const store = readWeightStore();
-    const tk = formatDateKey(new Date());
-    const td = store[tk];
-    if (td) {
-      setWInp(td.weight !== undefined ? String(td.weight) : "");
-      setFatInp(td.fat !== undefined ? String(td.fat) : "");
-      setMusInp(td.muscle !== undefined ? String(td.muscle) : "");
-    }
   }, []);
+
+  useEffect(() => {
+    void reloadDietWindow();
+  }, [reloadDietWindow]);
+
+  useEffect(() => {
+    void reloadCalendarMealDots();
+  }, [reloadCalendarMealDots]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    if (!dietTab) void reloadBodyForRange();
+  }, [mounted, dietTab, reloadBodyForRange]);
+
+  useEffect(() => {
+    if (!mounted || dietTab) return;
+    void loadTodayInputs();
+  }, [mounted, dietTab, loadTodayInputs]);
 
   const dietWindow = useMemo(() => {
     const end = new Date();
@@ -365,9 +680,10 @@ export default function AnalysisTab() {
     let sumEat = 0;
     let sumBurn = 0;
     let active = 0;
+
     dietWindow.forEach((dk) => {
-      const ks = sumMealsKcal(readMealsStored(dk));
-      const bw = readBurnTotal(dk);
+      const ks = sumMealsKcal(mealsByDate.get(dk) ?? []);
+      const bw = activityBurnByDate.get(dk) ?? 0;
       if (ks > 0 || bw > 0) active += 1;
       sumEat += ks;
       sumBurn += bw;
@@ -383,19 +699,18 @@ export default function AnalysisTab() {
           day: "numeric",
           month: "short",
         }),
-        eat: Math.max(0, sumMealsKcal(readMealsStored(dk))),
-        burn: Math.max(0, readBurnTotal(dk)),
+        eat: Math.max(0, sumMealsKcal(mealsByDate.get(dk) ?? [])),
+        burn: Math.max(0, activityBurnByDate.get(dk) ?? 0),
       })),
     };
-  }, [dietWindow]);
+  }, [dietWindow, mealsByDate, activityBurnByDate]);
 
   const kcalWeightLineData = useMemo(() => {
     const end = new Date();
     const start = startDateForRange(dietRange, end);
     const keys = enumerateDays(start, end);
-    const store = readWeightStore();
     return keys.map((dk) => {
-      const raw = store[dk]?.weight;
+      const raw = weightKgByDateDietWindow.get(dk);
       const w =
         typeof raw === "number" && Number.isFinite(raw) ? raw : null;
       return {
@@ -403,11 +718,11 @@ export default function AnalysisTab() {
           day: "numeric",
           month: "short",
         }),
-        kcal: sumMealsKcal(readMealsStored(dk)),
+        kcal: sumMealsKcal(mealsByDate.get(dk) ?? []),
         weight: w,
       };
     });
-  }, [dietRange, mounted]);
+  }, [dietRange, weightKgByDateDietWindow, mealsByDate]);
 
   const showWeightAxis = useMemo(
     () =>
@@ -418,8 +733,8 @@ export default function AnalysisTab() {
   );
 
   const mealsDay = useMemo(
-    () => readMealsStored(dayPick),
-    [dayPick, mounted]
+    () => mealsByDate.get(dayPick) ?? [],
+    [mealsByDate, dayPick]
   );
 
   function shiftFoodDay(d: number) {
@@ -427,7 +742,6 @@ export default function AnalysisTab() {
     setDayPick(x);
   }
 
-  /** weight series */
   const weightWindowKeys = useMemo(() => {
     const end = new Date();
     const start = startDateForRange(wRange, end);
@@ -435,10 +749,9 @@ export default function AnalysisTab() {
   }, [wRange]);
 
   const weightSeriesRaw = useMemo(() => {
-    const st = readWeightStore();
     return weightWindowKeys
       .map((dk) => {
-        const e: WeightDay | undefined = st[dk];
+        const e = bodyRowsByDate.get(dk);
         let v = 0;
 
         if (wm === "weight") v = e?.weight ?? Number.NaN;
@@ -448,7 +761,7 @@ export default function AnalysisTab() {
         return { dk, v };
       })
       .filter((row) => Number.isFinite(row.v));
-  }, [weightWindowKeys, wm, mounted]);
+  }, [weightWindowKeys, wm, bodyRowsByDate]);
 
   const cards = useMemo(() => {
     const vals = weightSeriesRaw.map((r) => r.v);
@@ -463,24 +776,82 @@ export default function AnalysisTab() {
     };
   }, [weightSeriesRaw]);
 
-  function saveMeasures(e: React.FormEvent) {
+  async function saveMeasures(e: React.FormEvent) {
     e.preventDefault();
+    const sb = createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
     const tk = formatDateKey(new Date());
-    const nw: WeightDay = {};
+    if (!user) return;
+
+    const { data: existing } = await sb
+      .from("body_metrics")
+      .select("weight_kg,fat_pct,muscle_kg")
+      .eq("user_id", user.id)
+      .eq("date", tk)
+      .maybeSingle();
+
+    const prev = existing as {
+      weight_kg?: number | null;
+      fat_pct?: number | null;
+      muscle_kg?: number | null;
+    } | null;
+
+    const merged = (
+      inp: string,
+      prior: number | null | undefined,
+      fieldParsed: () => number | null
+    ) => {
+      if (!inp.trim()) {
+        return typeof prior === "number" && Number.isFinite(prior)
+          ? prior
+          : null;
+      }
+      return fieldParsed();
+    };
 
     const w = Number(wInp.replace(",", "."));
     const f = Number(fatInp.replace(",", "."));
     const mu = Number(musInp.replace(",", "."));
 
-    if (Number.isFinite(w)) nw.weight = Math.round(w * 10) / 10;
-    if (Number.isFinite(f)) nw.fat = Math.round(f * 10) / 10;
-    if (Number.isFinite(mu)) nw.muscle = Math.round(mu * 10) / 10;
+    const payload = {
+      user_id: user.id,
+      date: tk,
+      weight_kg: merged(wInp, prev?.weight_kg, () =>
+        Number.isFinite(w) ? Math.round(w * 10) / 10 : null
+      ),
+      fat_pct: merged(fatInp, prev?.fat_pct, () =>
+        Number.isFinite(f) ? Math.round(f * 10) / 10 : null
+      ),
+      muscle_kg: merged(musInp, prev?.muscle_kg, () =>
+        Number.isFinite(mu) ? Math.round(mu * 10) / 10 : null
+      ),
+    };
 
-    const merged: WeightStorage = { ...readWeightStore(), [tk]: nw };
-    writeWeightStore(merged);
+    if (
+      payload.weight_kg == null &&
+      payload.fat_pct == null &&
+      payload.muscle_kg == null
+    )
+      return;
+
+    const { error } = await sb
+      .from("body_metrics")
+      .upsert(payload, { onConflict: "user_id,date" });
+
+    if (error) {
+      console.error("[AnalysisTab] body_metrics upsert:", error.message);
+      return;
+    }
+
+    await Promise.all([
+      reloadBodyForRange(),
+      reloadDietWindow(),
+      loadTodayInputs(),
+    ]);
   }
 
-  /** bar SVG */
   const barMax = Math.max(
     1,
     ...dietStats.barPoints.flatMap((b) => [b.eat, b.burn])
@@ -490,8 +861,13 @@ export default function AnalysisTab() {
     return <p className="py-12 text-center text-white/35">…</p>;
   }
 
+  const dataPending = dietTab ? dietLoading : bodyWideLoading || todayBodyLoading;
+
   return (
     <div className="space-y-5 pb-8 text-white">
+      {dataPending ? (
+        <p className="text-center text-[11px] text-white/40">Ładowanie...</p>
+      ) : null}
       <div className="flex gap-2">
         <button
           type="button"
@@ -774,6 +1150,7 @@ export default function AnalysisTab() {
                 setMonth={setCalMonth}
                 picked={dayPick}
                 onPick={setDayPick}
+                mealDatesPresent={calendarMonthMealDates}
               />
             )}
           </section>
@@ -790,7 +1167,7 @@ export default function AnalysisTab() {
           setFatInp={setFatInp}
           musInp={musInp}
           setMusInp={setMusInp}
-          saveMeasures={saveMeasures}
+          saveMeasures={(e) => void saveMeasures(e)}
           weightSeriesRaw={weightSeriesRaw}
           cards={cards}
         />

@@ -354,6 +354,11 @@ export default function PlanTab() {
     await persist(nextPlan);
   }
 
+  async function removePlanMeal(mid: string) {
+    const next = plan.filter((m) => m.id !== mid);
+    await persist(next);
+  }
+
   const badge = totals.allConfirmed
     ? {
         bg: "#3B6D11",
@@ -507,14 +512,25 @@ export default function PlanTab() {
                     </p>
                   ) : null}
                 </div>
-                <button
-                  type="button"
-                  disabled={m.eaten}
-                  onClick={() => void markAte(m.id)}
-                  className="shrink-0 rounded-xl border border-white/25 px-4 py-2 text-xs font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  ✓ Zjadłem
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={m.eaten}
+                    onClick={() => void markAte(m.id)}
+                    className="rounded-xl border border-white/25 px-4 py-2 text-xs font-medium text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    ✓ Zjadłem
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void removePlanMeal(m.id)}
+                    className="rounded-lg px-2 py-2 text-xs font-medium text-red-400 transition hover:bg-white/10"
+                    aria-label="Usuń z planu"
+                    title="Usuń z planu"
+                  >
+                    ×
+                  </button>
+                </div>
               </li>
             ))}
           </ul>

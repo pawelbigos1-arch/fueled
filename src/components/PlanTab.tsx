@@ -81,57 +81,70 @@ export default function PlanTab() {
   const [manualFStr, setManualFStr] = useState("");
 
   const hydrateGoal = useCallback(async () => {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[PlanTab] goals auth:", authErr.message);
+      if (!user) {
+        setGoal({ calories: DEFAULT_GOAL_LS.calories });
+        return;
+      }
+      const { data, error } = await supabase
+        .from("goals")
+        .select("kcal")
+        .eq("user_id", user.id)
+        .single();
+
+      if (error) console.error("[PlanTab] goals:", error.message);
+
+      const k = Number((data as { kcal?: number } | null)?.kcal);
+      setGoal({
+        calories: Number.isFinite(k) && k > 0 ? Math.round(k) : DEFAULT_GOAL_LS.calories,
+      });
+    } catch (err) {
+      console.error("[PlanTab] goals:", err);
       setGoal({ calories: DEFAULT_GOAL_LS.calories });
+    } finally {
       setGoalLoading(false);
-      return;
     }
-    const { data, error } = await supabase
-      .from("goals")
-      .select("kcal")
-      .eq("user_id", user.id)
-      .maybeSingle();
-
-    if (error) console.error("[PlanTab] goals:", error.message);
-
-    const k = Number((data as { kcal?: number } | null)?.kcal);
-    setGoal({
-      calories: Number.isFinite(k) && k > 0 ? Math.round(k) : DEFAULT_GOAL_LS.calories,
-    });
-    setGoalLoading(false);
   }, []);
 
   const loadPlanForDay = useCallback(async () => {
     setPlanLoading(true);
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[PlanTab] meal_plans auth:", authErr.message);
+      if (!user) {
+        setPlan([]);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("meal_plans")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("date", day)
+        .single();
+
+      if (error) {
+        console.error("[PlanTab] meal_plans load:", error.message);
+        setPlan([]);
+      } else {
+        setPlan(jsonToPlanMeals((data as { meals?: unknown })?.meals));
+      }
+    } catch (err) {
+      console.error("[PlanTab] meal_plans load:", err);
       setPlan([]);
+    } finally {
       setPlanLoading(false);
-      return;
     }
-
-    const { data, error } = await supabase
-      .from("meal_plans")
-      .select("meals,status")
-      .eq("user_id", user.id)
-      .eq("date", day)
-      .maybeSingle();
-
-    if (error) {
-      console.error("[PlanTab] meal_plans load:", error.message);
-      setPlan([]);
-    } else {
-      setPlan(jsonToPlanMeals((data as { meals?: unknown })?.meals));
-    }
-
-    setPlanLoading(false);
   }, [day]);
 
   useEffect(() => {
@@ -151,27 +164,33 @@ export default function PlanTab() {
   }, [hydrateGoal]);
 
   async function persistToSupabase(next: PlanMeal[]) {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[PlanTab] meal_plans upsert auth:", authErr.message);
+      if (!user) return;
 
-    const allDone =
-      next.length > 0 && next.every((m) => m.eaten);
+      const allDone =
+        next.length > 0 && next.every((m) => m.eaten);
 
-    const { error } = await supabase.from("meal_plans").upsert(
-      {
-        user_id: user.id,
-        date: day,
-        meals: planMealsToJson(next),
-        status: allDone ? "confirmed" : "draft",
-      },
-      { onConflict: "user_id,date" }
-    );
+      const { error } = await supabase.from("meal_plans").upsert(
+        {
+          user_id: user.id,
+          date: day,
+          meals: planMealsToJson(next),
+          status: allDone ? "confirmed" : "draft",
+        },
+        { onConflict: "user_id,date" }
+      );
 
-    if (error) {
-      console.error("[PlanTab] meal_plans upsert:", error.message);
+      if (error) {
+        console.error("[PlanTab] meal_plans upsert:", error.message);
+      }
+    } catch (err) {
+      console.error("[PlanTab] meal_plans upsert:", err);
     }
   }
 
@@ -227,16 +246,18 @@ export default function PlanTab() {
     const text = inputText.trim();
     if (!text) return;
 
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
-
     setLoading(true);
     setParseError(null);
 
     try {
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[PlanTab] add parse auth:", authErr.message);
+      if (!user) return;
+
       const res = await fetch("/api/parse-food", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -260,7 +281,7 @@ export default function PlanTab() {
       };
 
       const meal: PlanMeal = {
-        id: crypto.randomUUID(),
+        id: Date.now().toString(),
         text,
         label: typeof p.name === "string" ? p.name : "Plan",
         calories: typeof p.kcal === "number" ? Math.round(p.kcal) : 0,
@@ -274,7 +295,8 @@ export default function PlanTab() {
       const next = [...plan, meal];
       await persist(next);
       setInputText("");
-    } catch {
+    } catch (err) {
+      console.error("[PlanTab] add parse:", err);
       setParseError("Błąd sieci");
     } finally {
       setLoading(false);
@@ -303,60 +325,119 @@ export default function PlanTab() {
     const carbs_g = parseGramInput(manualCStr);
     const fat_g = parseGramInput(manualFStr);
 
-    const meal: PlanMeal = {
-      id: crypto.randomUUID(),
-      text: label,
-      label,
-      calories: kcal,
-      protein_g,
-      carbs_g,
-      fat_g,
-      eaten: false,
-    };
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[PlanTab] add manual auth:", authErr.message);
+      if (!user) return;
 
-    await persist([...plan, meal]);
-    setManualLabel("");
-    setManualKcalStr("");
-    setManualPStr("");
-    setManualCStr("");
-    setManualFStr("");
+      const meal: PlanMeal = {
+        id: Date.now().toString(),
+        text: label,
+        label,
+        calories: kcal,
+        protein_g,
+        carbs_g,
+        fat_g,
+        eaten: false,
+      };
+
+      await persist([...plan, meal]);
+      setManualLabel("");
+      setManualKcalStr("");
+      setManualPStr("");
+      setManualCStr("");
+      setManualFStr("");
+    } catch (err) {
+      console.error("[PlanTab] add manual:", err);
+    }
   }
 
   async function markAte(mid: string) {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[PlanTab] confirm auth:", authErr.message);
+      if (!user) return;
 
-    const meal = plan.find((m) => m.id === mid);
-    if (!meal || meal.eaten) return;
+      const meal = plan.find((m) => m.id === mid);
+      if (!meal || meal.eaten) return;
 
-    const nextPlan = plan.map((m) =>
-      m.id === mid ? { ...m, eaten: true } : m
-    );
+      const nextPlan = plan.map((m) =>
+        m.id === mid ? { ...m, eaten: true } : m
+      );
 
-    const { error: insErr } = await supabase.from("meals").insert({
-      user_id: user.id,
-      date: day,
-      name: meal.label || meal.text,
-      kcal: meal.calories,
-      protein: meal.protein_g,
-      carbs: meal.carbs_g,
-      fat: meal.fat_g,
-    });
+      const { error: upErr } = await supabase.from("meal_plans").upsert(
+        {
+          user_id: user.id,
+          date: day,
+          meals: planMealsToJson(nextPlan),
+          status: "draft",
+        },
+        { onConflict: "user_id,date" }
+      );
+      if (upErr) {
+        console.error("[PlanTab] confirm → meal_plans:", upErr.message);
+        return;
+      }
 
-    if (insErr) {
-      console.error("[PlanTab] confirm → meals:", insErr.message);
-      return;
+      const { error: insErr } = await supabase.from("meals").insert({
+        user_id: user.id,
+        date: day,
+        name: meal.label || meal.text,
+        kcal: meal.calories,
+        protein: meal.protein_g,
+        carbs: meal.carbs_g,
+        fat: meal.fat_g,
+      });
+
+      if (insErr) {
+        console.error("[PlanTab] confirm → meals:", insErr.message);
+        return;
+      }
+
+      setPlan(nextPlan);
+    } catch (err) {
+      console.error("[PlanTab] confirm:", err);
     }
-
-    await persist(nextPlan);
   }
 
   async function removePlanMeal(mid: string) {
-    const next = plan.filter((m) => m.id !== mid);
-    await persist(next);
+    try {
+      const supabase = createClient();
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[PlanTab] remove auth:", authErr.message);
+      if (!user) return;
+
+      const next = plan.filter((m) => !(m.id === mid && !m.eaten));
+
+      const { error } = await supabase.from("meal_plans").upsert(
+        {
+          user_id: user.id,
+          date: day,
+          meals: planMealsToJson(next),
+          status: next.some((m) => !m.eaten) ? "draft" : "confirmed",
+        },
+        { onConflict: "user_id,date" }
+      );
+      if (error) {
+        console.error("[PlanTab] remove meal from plan:", error.message);
+        return;
+      }
+
+      setPlan(next);
+    } catch (err) {
+      console.error("[PlanTab] remove meal from plan:", err);
+    }
   }
 
   const badge = totals.allConfirmed

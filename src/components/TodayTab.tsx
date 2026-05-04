@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createClient } from "@/lib/supabase";
+import { createBrowserClient } from "@supabase/ssr";
 import {
   DEFAULT_GOAL_LS,
   addDays,
@@ -100,7 +100,31 @@ function parseGramInput(raw: string): number {
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
 }
 
+/** YYYY-MM-DD (UTC) + delta dni — spójnie z `toISOString().slice(0, 10)` */
+function addDaysUtcYmd(ymd: string, deltaDays: number): string {
+  const [y, m, d] = ymd.split("-").map((x) => parseInt(x, 10));
+  const t = Date.UTC(y, m - 1, d + deltaDays);
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+const LEGACY_MEAL_ACTIVITY_LS_KEYS = [
+  "fueled_today_meals",
+  "fueled_today_workouts",
+  "fueled_meals",
+  "fueled_workouts",
+  "fueled_activities",
+];
+
 export default function TodayTab() {
+  const supabase = useMemo(
+    () =>
+      createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      ),
+    []
+  );
+
   const [mealEntryMode, setMealEntryMode] = useState<"ai" | "manual">("ai");
 
   const [mealInput, setMealInput] = useState("");
@@ -116,7 +140,9 @@ export default function TodayTab() {
   const [activityText, setActivityText] = useState("");
   const [activityKcal, setActivityKcal] = useState("");
 
-  const [todayKey] = useState(() => formatDateKey(new Date()));
+  const [todayKey, setTodayKey] = useState(() =>
+    new Date().toISOString().slice(0, 10)
+  );
 
   const [calorieGoal, setCalorieGoal] = useState<number>(
     TODAY_FALLBACK.calorieGoal
@@ -147,127 +173,176 @@ export default function TodayTab() {
   }, []);
 
   const loadGoalsOnly = useCallback(async () => {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] goals auth:", authErr.message);
+      if (!user) {
+        applyGoals(null);
+        return;
+      }
+      const { data, error } = await supabase
+        .from("goals")
+        .select("*")
+        .eq("user_id", user.id)
+        .single();
+      if (error) {
+        console.error("[TodayTab] goals fetch:", error.message);
+        applyGoals(null);
+        return;
+      }
+      applyGoals((data ?? null) as Record<string, unknown> | null);
+    } catch (e) {
+      console.error("[TodayTab] goals fetch:", e);
       applyGoals(null);
-      return;
     }
-    const { data, error } = await supabase
-      .from("goals")
-      .select("*")
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (error) console.error("[TodayTab] goals fetch:", error.message);
-    applyGoals((data ?? null) as Record<string, unknown> | null);
-  }, [applyGoals]);
+  }, [applyGoals, supabase]);
 
   const fetchWeekTotals = useCallback(
-    async (userId: string) => {
-      const supabase = createClient();
-      const end = formatDateKey(new Date());
-      const start = formatDateKey(addDays(new Date(), -6));
+    async (userId: string, endYmd: string) => {
+      try {
+        const start = addDaysUtcYmd(endYmd, -6);
+        const [{ data: mt, error: em }, { data: at, error: ea }] =
+          await Promise.all([
+            supabase
+              .from("meals")
+              .select("date,kcal")
+              .eq("user_id", userId)
+              .gte("date", start)
+              .lte("date", endYmd),
+            supabase
+              .from("activities")
+              .select("date,kcal_burned")
+              .eq("user_id", userId)
+              .gte("date", start)
+              .lte("date", endYmd),
+          ]);
 
-      const [{ data: mt, error: em }, { data: at, error: ea }] =
-        await Promise.all([
-          supabase
-            .from("meals")
-            .select("date,kcal")
-            .eq("user_id", userId)
-            .gte("date", start)
-            .lte("date", end),
-          supabase
-            .from("activities")
-            .select("date,kcal_burned")
-            .eq("user_id", userId)
-            .gte("date", start)
-            .lte("date", end),
-        ]);
+        if (em) console.error("[TodayTab] week meals:", em.message);
+        if (ea) console.error("[TodayTab] week activities:", ea.message);
 
-      if (em) console.error("[TodayTab] week meals:", em.message);
-      if (ea) console.error("[TodayTab] week activities:", ea.message);
+        const agg: Record<string, { consumed: number; burned: number }> = {};
 
-      const agg: Record<string, { consumed: number; burned: number }> = {};
+        type M = { date: string; kcal: number | null };
+        type A = { date: string; kcal_burned: number | null };
+        ((mt ?? []) as M[]).forEach(({ date, kcal }) => {
+          if (!date) return;
+          if (!agg[date]) agg[date] = { consumed: 0, burned: 0 };
+          agg[date].consumed += Math.max(0, Math.round(Number(kcal) || 0));
+        });
+        ((at ?? []) as A[]).forEach(({ date, kcal_burned }) => {
+          if (!date) return;
+          if (!agg[date]) agg[date] = { consumed: 0, burned: 0 };
+          agg[date].burned += Math.max(
+            0,
+            Math.round(Number(kcal_burned) || 0)
+          );
+        });
 
-      type M = { date: string; kcal: number | null };
-      type A = { date: string; kcal_burned: number | null };
-      ((mt ?? []) as M[]).forEach(({ date, kcal }) => {
-        if (!date) return;
-        if (!agg[date]) agg[date] = { consumed: 0, burned: 0 };
-        agg[date].consumed += Math.max(0, Math.round(Number(kcal) || 0));
-      });
-      ((at ?? []) as A[]).forEach(({ date, kcal_burned }) => {
-        if (!date) return;
-        if (!agg[date]) agg[date] = { consumed: 0, burned: 0 };
-        agg[date].burned += Math.max(
-          0,
-          Math.round(Number(kcal_burned) || 0)
-        );
-      });
-
-      setWeekAgg(agg);
+        setWeekAgg(agg);
+      } catch (e) {
+        console.error("[TodayTab] fetchWeekTotals:", e);
+      }
     },
-    []
+    [supabase]
   );
 
   const hydrate = useCallback(async () => {
     setGoalsLoading(true);
     setDataLoading(true);
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] hydrate auth:", authErr.message);
 
-    if (!user) {
+      if (!user) {
+        setMeals([]);
+        setWorkouts([]);
+        setWeekAgg({});
+        applyGoals(null);
+        return;
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
+      setTodayKey(today);
+
+      const { data: gRow, error: eg } = await supabase
+        .from("goals")
+        .select("*")
+        .eq("user_id", user.id)
+        .single();
+      if (eg) {
+        console.error("[TodayTab] goals:", eg.message);
+        applyGoals(null);
+      } else {
+        applyGoals((gRow ?? null) as Record<string, unknown> | null);
+      }
+
+      const { data: mRows, error: em } = await supabase
+        .from("meals")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("date", today);
+      if (em) {
+        console.error("[TodayTab] meals:", em.message);
+        setMeals([]);
+      } else {
+        setMeals(mapMealsDb((mRows ?? []) as MealRowDb[]));
+      }
+
+      const { data: aRows, error: ea } = await supabase
+        .from("activities")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("date", today);
+      if (ea) {
+        console.error("[TodayTab] activities:", ea.message);
+        setWorkouts([]);
+      } else {
+        type ActRowDb = {
+          id: string;
+          name: string;
+          kcal_burned: number | null;
+        };
+        setWorkouts(
+          ((aRows ?? []) as ActRowDb[]).map((r) => ({
+            id: r.id,
+            description: typeof r.name === "string" ? r.name : "",
+            caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+          }))
+        );
+      }
+
+      await fetchWeekTotals(user.id, today);
+    } catch (e) {
+      console.error("[TodayTab] hydrate:", e);
       setMeals([]);
       setWorkouts([]);
       setWeekAgg({});
       applyGoals(null);
+    } finally {
       setGoalsLoading(false);
       setDataLoading(false);
-      return;
     }
-
-    const uid = user.id;
-
-    const [{ data: gRow, error: eg }, { data: mRows, error: em }, { data: aRows, error: ea }] =
-      await Promise.all([
-        supabase.from("goals").select("*").eq("user_id", uid).maybeSingle(),
-        supabase.from("meals").select("*").eq("user_id", uid).eq("date", todayKey),
-        supabase.from("activities").select("*").eq("user_id", uid).eq("date", todayKey),
-      ]);
-
-    if (eg) console.error("[TodayTab] goals:", eg.message);
-    if (em) console.error("[TodayTab] meals:", em.message);
-    if (ea) console.error("[TodayTab] activities:", ea.message);
-
-    applyGoals((gRow ?? null) as Record<string, unknown> | null);
-    setMeals(mapMealsDb(((mRows ?? []) as MealRowDb[])));
-
-    type ActRowDb = {
-      id: string;
-      name: string;
-      kcal_burned: number | null;
-    };
-    setWorkouts(
-      ((aRows ?? []) as ActRowDb[]).map((r) => ({
-        id: r.id,
-        description: typeof r.name === "string" ? r.name : "",
-        caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
-      }))
-    );
-
-    await fetchWeekTotals(uid);
-
-    setGoalsLoading(false);
-    setDataLoading(false);
-  }, [applyGoals, todayKey, fetchWeekTotals]);
+  }, [applyGoals, fetchWeekTotals, supabase]);
 
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
+
+  useEffect(() => {
+    try {
+      for (const k of LEGACY_MEAL_ACTIVITY_LS_KEYS) {
+        localStorage.removeItem(k);
+      }
+    } catch (e) {
+      console.error("[TodayTab] localStorage cleanup:", e);
+    }
+  }, []);
 
   useEffect(() => {
     function onFocus() {
@@ -311,7 +386,6 @@ export default function TodayTab() {
   }, [meals, workouts, calorieGoal]);
 
   const weekSeries = useMemo(() => {
-    const end = new Date();
     const rows: Array<{
       dk: string;
       label: string;
@@ -322,8 +396,7 @@ export default function TodayTab() {
     }> = [];
 
     for (let offset = -6; offset <= 0; offset += 1) {
-      const d = addDays(end, offset);
-      const dk = formatDateKey(d);
+      const dk = addDaysUtcYmd(todayKey, offset);
       const isToday = dk === todayKey;
 
       let consumed = 0;
@@ -366,15 +439,19 @@ export default function TodayTab() {
     const text = mealInput.trim();
     if (!text) return;
 
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
-
     setMealLoading(true);
 
     try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] meal add auth:", authErr.message);
+      if (!user) return;
+
+      const today = new Date().toISOString().slice(0, 10);
+      setTodayKey(today);
+
       const res = await fetch("/api/parse-food", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -401,24 +478,19 @@ export default function TodayTab() {
         fat?: number;
       };
 
-      const label =
-        typeof parsed.name === "string" ? parsed.name : "Posiłek";
-
       const { data: inserted, error } = await supabase
         .from("meals")
         .insert({
           user_id: user.id,
-          date: todayKey,
-          name: label,
-          kcal:
-            typeof parsed.kcal === "number" ? Math.round(parsed.kcal) : 0,
-          protein:
-            typeof parsed.protein === "number" ? Math.round(parsed.protein) : 0,
+          date: today,
+          name: typeof parsed.name === "string" ? parsed.name : "Posiłek",
+          kcal: typeof parsed.kcal === "number" ? Math.round(parsed.kcal) : 0,
+          protein: typeof parsed.protein === "number" ? Math.round(parsed.protein) : 0,
           carbs: typeof parsed.carbs === "number" ? Math.round(parsed.carbs) : 0,
           fat: typeof parsed.fat === "number" ? Math.round(parsed.fat) : 0,
         })
-        .select("id,name,kcal,protein,carbs,fat")
-        .maybeSingle();
+        .select("*")
+        .single();
 
       if (error) {
         console.error("[TodayTab] meal insert:", error.message);
@@ -431,14 +503,14 @@ export default function TodayTab() {
         const [mapped] = mapMealsDb([row]);
         if (mapped) {
           mapped.text = text;
-          mapped.label = label;
         }
-        setMeals((prev) => [...prev, mapped]);
+        setMeals((prev) => (mapped ? [...prev, mapped] : prev));
       }
 
       setMealInput("");
-      await fetchWeekTotals(user.id);
-    } catch {
+      await fetchWeekTotals(user.id, today);
+    } catch (err) {
+      console.error("[TodayTab] meal add:", err);
       setMealError("Brak połączenia lub błąd sieci.");
     } finally {
       setMealLoading(false);
@@ -467,60 +539,77 @@ export default function TodayTab() {
     const carbs_g = parseGramInput(manualCStr);
     const fat_g = parseGramInput(manualFStr);
 
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] meal manual auth:", authErr.message);
+      if (!user) return;
 
-    const { data: inserted, error } = await supabase
-      .from("meals")
-      .insert({
-        user_id: user.id,
-        date: todayKey,
-        name: label,
-        kcal,
-        protein: protein_g,
-        carbs: carbs_g,
-        fat: fat_g,
-      })
-      .select("id,name,kcal,protein,carbs,fat")
-      .maybeSingle();
+      const today = new Date().toISOString().slice(0, 10);
+      setTodayKey(today);
 
-    if (error) {
-      console.error("[TodayTab] meal manual:", error.message);
-      setMealError(error.message);
-      return;
+      const { data: inserted, error } = await supabase
+        .from("meals")
+        .insert({
+          user_id: user.id,
+          date: today,
+          name: label,
+          kcal,
+          protein: protein_g,
+          carbs: carbs_g,
+          fat: fat_g,
+        })
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error("[TodayTab] meal manual:", error.message);
+        setMealError(error.message);
+        return;
+      }
+
+      const row = inserted as MealRowDb | null;
+      if (row) setMeals((prev) => [...prev, ...mapMealsDb([row])]);
+
+      setManualLabel("");
+      setManualKcalStr("");
+      setManualPStr("");
+      setManualCStr("");
+      setManualFStr("");
+      await fetchWeekTotals(user.id, today);
+    } catch (err) {
+      console.error("[TodayTab] meal manual:", err);
     }
-
-    const row = inserted as MealRowDb | null;
-    if (row) setMeals((prev) => [...prev, ...mapMealsDb([row])]);
-
-    setManualLabel("");
-    setManualKcalStr("");
-    setManualPStr("");
-    setManualCStr("");
-    setManualFStr("");
-    await fetchWeekTotals(user.id);
   }
 
   async function removeMeal(id: string) {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
-    const { error } = await supabase
-      .from("meals")
-      .delete()
-      .eq("id", id)
-      .eq("user_id", user.id);
-    if (error) {
-      console.error("[TodayTab] meal delete:", error.message);
-      return;
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] meal delete auth:", authErr.message);
+      if (!user) return;
+
+      const today = new Date().toISOString().slice(0, 10);
+      setTodayKey(today);
+
+      const { error } = await supabase
+        .from("meals")
+        .delete()
+        .eq("id", id)
+        .eq("user_id", user.id);
+      if (error) {
+        console.error("[TodayTab] meal delete:", error.message);
+        return;
+      }
+      setMeals((prev) => prev.filter((m) => m.id !== id));
+      await fetchWeekTotals(user.id, today);
+    } catch (err) {
+      console.error("[TodayTab] meal delete:", err);
     }
-    setMeals((prev) => prev.filter((m) => m.id !== id));
-    await fetchWeekTotals(user.id);
   }
 
   async function handleAddActivity(e: React.FormEvent) {
@@ -532,61 +621,77 @@ export default function TodayTab() {
 
     if (!description || caloriesBurned <= 0) return;
 
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] activity add auth:", authErr.message);
+      if (!user) return;
 
-    const { data: inserted, error } = await supabase
-      .from("activities")
-      .insert({
-        user_id: user.id,
-        date: todayKey,
-        name: description,
-        kcal_burned: caloriesBurned,
-      })
-      .select("id,name,kcal_burned")
-      .maybeSingle();
+      const today = new Date().toISOString().slice(0, 10);
+      setTodayKey(today);
 
-    if (error) {
-      console.error("[TodayTab] activity insert:", error.message);
-      return;
+      const { data: inserted, error } = await supabase
+        .from("activities")
+        .insert({
+          user_id: user.id,
+          date: today,
+          name: description,
+          kcal_burned: caloriesBurned,
+        })
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error("[TodayTab] activity insert:", error.message);
+        return;
+      }
+
+      const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
+      if (r) {
+        setWorkouts((prev) => [
+          ...prev,
+          {
+            id: r.id,
+            description: r.name,
+            caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+          },
+        ]);
+      }
+      setActivityText("");
+      setActivityKcal("");
+      await fetchWeekTotals(user.id, today);
+    } catch (err) {
+      console.error("[TodayTab] activity insert:", err);
     }
-
-    const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
-    if (r) {
-      setWorkouts((prev) => [
-        ...prev,
-        {
-          id: r.id,
-          description: r.name,
-          caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
-        },
-      ]);
-    }
-    setActivityText("");
-    setActivityKcal("");
-    await fetchWeekTotals(user.id);
   }
 
   async function removeActivity(id: string) {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) return;
-    const { error } = await supabase
-      .from("activities")
-      .delete()
-      .eq("id", id)
-      .eq("user_id", user.id);
-    if (error) {
-      console.error("[TodayTab] activity delete:", error.message);
-      return;
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] activity delete auth:", authErr.message);
+      if (!user) return;
+      const today = new Date().toISOString().slice(0, 10);
+      setTodayKey(today);
+
+      const { error } = await supabase
+        .from("activities")
+        .delete()
+        .eq("id", id)
+        .eq("user_id", user.id);
+      if (error) {
+        console.error("[TodayTab] activity delete:", error.message);
+        return;
+      }
+      setWorkouts((prev) => prev.filter((w) => w.id !== id));
+      await fetchWeekTotals(user.id, today);
+    } catch (err) {
+      console.error("[TodayTab] activity delete:", err);
     }
-    setWorkouts((prev) => prev.filter((w) => w.id !== id));
-    await fetchWeekTotals(user.id);
   }
 
   const remainingLabel =

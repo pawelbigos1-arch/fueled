@@ -27,6 +27,23 @@ type PlanMealJson = {
   confirmed: boolean;
 };
 
+/** `Boolean("false") === true` — dane z JSON/DB bywają jako string */
+function mealConfirmedFromJson(v: unknown): boolean {
+  if (v === true || v === 1) return true;
+  if (v === false || v === 0) return false;
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    return t === "true" || t === "1" || t === "yes";
+  }
+  return false;
+}
+
+function stablePlanMealId(raw: unknown): string {
+  if (raw === undefined || raw === null) return crypto.randomUUID();
+  const s = String(raw).trim();
+  return s === "" ? crypto.randomUUID() : s;
+}
+
 function planMealsToJson(meals: PlanMeal[]): PlanMealJson[] {
   return meals.map((pm) => ({
     id: pm.id,
@@ -42,20 +59,25 @@ function planMealsToJson(meals: PlanMeal[]): PlanMealJson[] {
 function jsonToPlanMeals(raw: unknown): PlanMeal[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((x) => {
-    const row = x as Partial<PlanMealJson>;
+    const row = x as Partial<PlanMealJson & { id?: unknown; confirmed?: unknown }>;
     const name =
       typeof row.name === "string" ? row.name : "Plan";
     return {
-      id: typeof row.id === "string" ? row.id : crypto.randomUUID(),
+      id: stablePlanMealId(row.id),
       text: name,
       label: name,
       calories: Math.round(Number(row.kcal) || 0),
       protein_g: Math.round(Number(row.protein) || 0),
       carbs_g: Math.round(Number(row.carbs) || 0),
       fat_g: Math.round(Number(row.fat) || 0),
-      eaten: Boolean(row.confirmed),
+      eaten: mealConfirmedFromJson(row.confirmed),
     };
   });
+}
+
+function planMealStatus(next: PlanMeal[]): "draft" | "confirmed" {
+  const allDone = next.length > 0 && next.every((m) => m.eaten);
+  return allDone ? "confirmed" : "draft";
 }
 
 export default function PlanTab() {
@@ -173,15 +195,12 @@ export default function PlanTab() {
       if (authErr) console.error("[PlanTab] meal_plans upsert auth:", authErr.message);
       if (!user) return;
 
-      const allDone =
-        next.length > 0 && next.every((m) => m.eaten);
-
       const { error } = await supabase.from("meal_plans").upsert(
         {
           user_id: user.id,
           date: day,
           meals: planMealsToJson(next),
-          status: allDone ? "confirmed" : "draft",
+          status: planMealStatus(next),
         },
         { onConflict: "user_id,date" }
       );
@@ -366,11 +385,11 @@ export default function PlanTab() {
       if (authErr) console.error("[PlanTab] confirm auth:", authErr.message);
       if (!user) return;
 
-      const meal = plan.find((m) => m.id === mid);
+      const meal = plan.find((m) => String(m.id) === String(mid));
       if (!meal || meal.eaten) return;
 
       const nextPlan = plan.map((m) =>
-        m.id === mid ? { ...m, eaten: true } : m
+        String(m.id) === String(mid) ? { ...m, eaten: true } : m
       );
 
       const { error: upErr } = await supabase.from("meal_plans").upsert(
@@ -418,25 +437,35 @@ export default function PlanTab() {
       if (authErr) console.error("[PlanTab] remove auth:", authErr.message);
       if (!user) return;
 
-      const next = plan.filter((m) => !(m.id === mid && !m.eaten));
+      const target = plan.find((m) => String(m.id) === String(mid));
+      if (!target) return;
+      if (target.eaten) {
+        setParseError("Nie można usunąć pozycji już zatwierdzonej do dziennika.");
+        return;
+      }
+
+      const next = plan.filter((m) => String(m.id) !== String(mid));
 
       const { error } = await supabase.from("meal_plans").upsert(
         {
           user_id: user.id,
           date: day,
           meals: planMealsToJson(next),
-          status: next.some((m) => !m.eaten) ? "draft" : "confirmed",
+          status: planMealStatus(next),
         },
         { onConflict: "user_id,date" }
       );
       if (error) {
         console.error("[PlanTab] remove meal from plan:", error.message);
+        setParseError(`Usuwanie nie powiodło się: ${error.message}`);
         return;
       }
 
+      setParseError(null);
       setPlan(next);
     } catch (err) {
       console.error("[PlanTab] remove meal from plan:", err);
+      setParseError("Usuwanie nie powiodło się (błąd sieci lub serwera).");
     }
   }
 
@@ -604,10 +633,15 @@ export default function PlanTab() {
                   </button>
                   <button
                     type="button"
+                    disabled={m.eaten}
                     onClick={() => void removePlanMeal(m.id)}
-                    className="rounded-lg px-2 py-2 text-xs font-medium text-red-400 transition hover:bg-white/10"
-                    aria-label="Usuń z planu"
-                    title="Usuń z planu"
+                    className="rounded-lg px-2 py-2 text-xs font-medium text-red-400 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    aria-label={m.eaten ? "Nie można usunąć zatwierdzonej pozycji" : "Usuń z planu"}
+                    title={
+                      m.eaten
+                        ? "Najpierw usuń wpis z dziś, jeśli pomyłka"
+                        : "Usuń z planu"
+                    }
                   >
                     ×
                   </button>

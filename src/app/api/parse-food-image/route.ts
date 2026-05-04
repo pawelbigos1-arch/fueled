@@ -43,13 +43,27 @@ export async function POST(request: NextRequest) {
               {
                 type: "text",
                 text:
-                  'Identify this food. Return ONLY JSON (no markdown): {"name":"Polish name","kcal":n,"protein":n,"carbs":n,"fat":n}. Estimate realistic portion size.',
+                  [
+                    "Identify the food on the photo. Return ONLY JSON (no markdown, no prose):",
+                    '{"name":"short Polish product/dish name","kcal_per_100g":n,"protein_per_100g":n,"carbs_per_100g":n,"fat_per_100g":n}',
+                    "All numeric values MUST be nutritional estimates PER 100 g of edible product (kcal and grams B/W/T per 100 g).",
+                    "If unsure, give a cautious typical value for this food category in Poland.",
+                  ].join(" "),
               },
             ],
           },
         ],
       }),
     });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      console.error("[parse-food-image] Anthropic:", response.status, errText);
+      return NextResponse.json(
+        { error: "Model request failed" },
+        { status: 502 }
+      );
+    }
 
     const data = (await response.json()) as {
       content?: Array<{ text?: string }>;

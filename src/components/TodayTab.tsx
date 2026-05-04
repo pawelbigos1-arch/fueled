@@ -36,6 +36,45 @@ type AiParsedNutrition = {
   fat?: number;
 };
 
+/** Wartości na 100 g ze zdjęcia (`/api/parse-food-image`) */
+type ImageNutritionPer100g = {
+  name: string;
+  kcal100: number;
+  protein100: number;
+  carbs100: number;
+  fat100: number;
+};
+
+function nutritionPer100gFromImageApi(
+  parsed: Record<string, unknown>
+): ImageNutritionPer100g {
+  const nameRaw = parsed.name;
+  const name =
+    typeof nameRaw === "string" && nameRaw.trim()
+      ? nameRaw.trim()
+      : "Ze zdjęcia";
+
+  const pick = (prefer: string, alt: string): number => {
+    const a = parsed[prefer];
+    const b = parsed[alt];
+    const v =
+      typeof a === "number" && Number.isFinite(a)
+        ? a
+        : typeof b === "number" && Number.isFinite(b)
+          ? b
+          : NaN;
+    return Number.isFinite(v) ? Math.max(0, v) : 0;
+  };
+
+  return {
+    name,
+    kcal100: pick("kcal_per_100g", "kcal"),
+    protein100: pick("protein_per_100g", "protein"),
+    carbs100: pick("carbs_per_100g", "carbs"),
+    fat100: pick("fat_per_100g", "fat"),
+  };
+}
+
 export type Meal = {
   id: string;
   text: string;
@@ -139,6 +178,11 @@ export default function TodayTab() {
   const [mealInput, setMealInput] = useState("");
   const [mealLoading, setMealLoading] = useState(false);
   const [mealImageLoading, setMealImageLoading] = useState(false);
+  const [imageMealDraft, setImageMealDraft] = useState<ImageNutritionPer100g | null>(
+    null
+  );
+  const [imageMealGramsStr, setImageMealGramsStr] = useState("100");
+  const [imageMealSaving, setImageMealSaving] = useState(false);
   const [mealError, setMealError] = useState<string | null>(null);
   const mealPhotoInputRef = useRef<HTMLInputElement>(null);
 
@@ -498,6 +542,21 @@ export default function TodayTab() {
     return rows;
   }, [todayKey, meals, workouts, calorieGoal, weekAgg]);
 
+  const imagePortionPreview = useMemo(() => {
+    if (!imageMealDraft) return null;
+    const raw = Number.parseFloat(imageMealGramsStr.replace(",", ".").trim());
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    const gramsRounded = Math.max(1, Math.round(raw));
+    const f = gramsRounded / 100;
+    return {
+      grams: gramsRounded,
+      kcal: Math.round(imageMealDraft.kcal100 * f),
+      p: Math.round(imageMealDraft.protein100 * f),
+      c: Math.round(imageMealDraft.carbs100 * f),
+      fat: Math.round(imageMealDraft.fat100 * f),
+    };
+  }, [imageMealDraft, imageMealGramsStr]);
+
   async function handleAddMeal(e: React.FormEvent) {
     e.preventDefault();
     setMealError(null);
@@ -584,11 +643,10 @@ export default function TodayTab() {
             return;
           }
 
-          const label =
-            typeof parsed.name === "string" && parsed.name.trim()
-              ? parsed.name.trim()
-              : "Ze zdjęcia";
-          await insertAiParsedMealToSupabase(parsed, `[zdjęcie] ${label}`);
+          setImageMealDraft(
+            nutritionPer100gFromImageApi(parsed as Record<string, unknown>)
+          );
+          setImageMealGramsStr("100");
         } catch (err) {
           console.error("[TodayTab] parse-food-image:", err);
           setMealError("Błąd sieci przy analizie zdjęcia.");
@@ -603,6 +661,38 @@ export default function TodayTab() {
       setMealError("Nie udało się wczytać pliku.");
     };
     reader.readAsDataURL(file);
+  }
+
+  async function confirmImageMealDraft() {
+    if (!imageMealDraft) return;
+    const g = Number.parseFloat(imageMealGramsStr.replace(",", ".").trim());
+    if (!Number.isFinite(g) || g <= 0) {
+      setMealError("Podaj ile gramów zjadłeś (liczba większa od 0).");
+      return;
+    }
+    setMealError(null);
+    setImageMealSaving(true);
+    try {
+      const gramsRounded = Math.max(1, Math.round(g));
+      const f = gramsRounded / 100;
+      const portionName = `${imageMealDraft.name} (${gramsRounded} g)`;
+      const ok = await insertAiParsedMealToSupabase(
+        {
+          name: portionName,
+          kcal: Math.round(imageMealDraft.kcal100 * f),
+          protein: Math.round(imageMealDraft.protein100 * f),
+          carbs: Math.round(imageMealDraft.carbs100 * f),
+          fat: Math.round(imageMealDraft.fat100 * f),
+        },
+        `[zdjęcie] ${imageMealDraft.name}, ${gramsRounded} g`
+      );
+      if (ok) {
+        setImageMealDraft(null);
+        setImageMealGramsStr("100");
+      }
+    } finally {
+      setImageMealSaving(false);
+    }
   }
 
   async function handleAddMealManual(e: React.FormEvent) {
@@ -873,7 +963,10 @@ export default function TodayTab() {
           <strong className="text-white/55">AI</strong> szacuje makra z opisu;{" "}
           <strong className="text-white/55">własne kcal</strong> — gdy znasz wartość z opakowania
           lub innego źródła. <strong className="text-white/55">Mów</strong> przy polu opisu zamienia
-          mowę na tekst. <strong className="text-white/55">Aparat</strong> 📷 ocenia makra ze zdjęcia.
+          mowę na tekst. <strong className="text-white/55">Aparat</strong> 📷 odczytuje{" "}
+          <strong className="text-white/55">wartości na 100 g</strong>, potem podajesz{" "}
+          <strong className="text-white/55">ile gramów zjadłeś</strong> — kalorie i makra są
+          przeliczane proporcjonalnie.
         </p>
         <div
           className="mb-3 flex rounded-xl border border-white/12 bg-black/25 p-0.5"
@@ -903,6 +996,7 @@ export default function TodayTab() {
             onClick={() => {
               setMealEntryMode("manual");
               setMealError(null);
+              setImageMealDraft(null);
             }}
             className={`min-h-[44px] flex-1 rounded-[10px] px-3 text-xs font-semibold transition ${
               mealEntryMode === "manual"
@@ -931,20 +1025,35 @@ export default function TodayTab() {
                 onChange={(e) => setMealInput(e.target.value)}
                 placeholder="np. owsianka z bananem, 2 jajka, jogurt..."
                 className="min-w-0 flex-1 rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
-                disabled={mealLoading || mealImageLoading}
+                disabled={
+                  mealLoading ||
+                  mealImageLoading ||
+                  imageMealSaving ||
+                  !!imageMealDraft
+                }
               />
               <button
                 type="button"
-                disabled={mealLoading || mealImageLoading}
+                disabled={
+                  mealLoading ||
+                  mealImageLoading ||
+                  imageMealSaving ||
+                  !!imageMealDraft
+                }
                 onClick={() => mealPhotoInputRef.current?.click()}
                 aria-label="Dodaj zdjęcie posiłku"
-                title="Zdjęcie → AI"
+                title="Zdjęcie → szacunek na 100 g"
                 className="touch-manipulation shrink-0 whitespace-nowrap rounded-xl border border-white/25 bg-transparent px-4 py-3 text-lg transition hover:border-[#EF9F27]/50 hover:bg-white/5 disabled:opacity-45"
               >
                 📷
               </button>
               <VoiceDictationButton
-                disabled={mealLoading || mealImageLoading}
+                disabled={
+                  mealLoading ||
+                  mealImageLoading ||
+                  imageMealSaving ||
+                  !!imageMealDraft
+                }
                 onAppendTranscript={(t) =>
                   setMealInput((prev) =>
                     prev.trim() ? `${prev.trim()} ${t}` : t
@@ -955,9 +1064,77 @@ export default function TodayTab() {
             {mealImageLoading ? (
               <p className="text-center text-xs text-white/50">Analizuję zdjęcie...</p>
             ) : null}
+
+            {imageMealDraft ? (
+              <div className="space-y-3 rounded-xl border border-[#BA7517]/45 bg-black/25 p-3">
+                <p className="text-[11px] font-semibold text-[#BA7517]">
+                  Zdjęcie — wartości referencyjne na 100 g
+                </p>
+                <p className="text-sm font-medium text-white">{imageMealDraft.name}</p>
+                <p className="text-xs text-white/55">
+                  {Math.round(imageMealDraft.kcal100)} kcal · B{" "}
+                  {Math.round(imageMealDraft.protein100)} g · W{" "}
+                  {Math.round(imageMealDraft.carbs100)} g · T{" "}
+                  {Math.round(imageMealDraft.fat100)} g{" "}
+                  <span className="text-white/35">/ 100 g</span>
+                </p>
+                <label className="block text-[11px] text-white/50">
+                  Ile gramów zjadłeś?
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min={1}
+                    step={1}
+                    value={imageMealGramsStr}
+                    onChange={(e) => setImageMealGramsStr(e.target.value)}
+                    disabled={imageMealSaving}
+                    className="mt-1 w-full rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-2.5 text-sm text-white outline-none focus:border-[#EF9F27]/60 disabled:opacity-50"
+                  />
+                </label>
+                {imagePortionPreview ? (
+                  <p className="text-xs text-[#BA7517]">
+                    Twoja porcja ({imagePortionPreview.grams} g):{" "}
+                    {imagePortionPreview.kcal} kcal · B {imagePortionPreview.p} · W{" "}
+                    {imagePortionPreview.c} · T {imagePortionPreview.fat}
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-white/35">
+                    Wpisz gramaturę porcji, żeby zobaczyć podsumowanie.
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={imageMealSaving}
+                    onClick={() => {
+                      setImageMealDraft(null);
+                      setImageMealGramsStr("100");
+                      setMealError(null);
+                    }}
+                    className="flex-1 rounded-xl border border-white/20 py-2.5 text-xs font-medium text-white/80 hover:bg-white/5 disabled:opacity-50"
+                  >
+                    Anuluj
+                  </button>
+                  <button
+                    type="button"
+                    disabled={imageMealSaving || !imagePortionPreview}
+                    onClick={() => void confirmImageMealDraft()}
+                    className="flex-1 rounded-xl border border-[#EF9F27]/55 bg-[#EF9F27]/15 py-2.5 text-xs font-semibold text-[#EF9F27] hover:bg-[#EF9F27]/25 disabled:opacity-45"
+                  >
+                    {imageMealSaving ? "Zapisuję…" : "Dodaj posiłek"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             <button
               type="submit"
-              disabled={mealLoading || mealImageLoading}
+              disabled={
+                mealLoading ||
+                mealImageLoading ||
+                imageMealSaving ||
+                !!imageMealDraft
+              }
               className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5 disabled:opacity-55"
             >
               {mealLoading ? "Parsowanie…" : "Dodaj posiłek"}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createBrowserClient } from "@supabase/ssr";
 import {
   DEFAULT_GOAL_LS,
@@ -26,6 +26,15 @@ const TODAY_FALLBACK = {
   carbsGoal: DEFAULT_GOAL_LS.carbs,
   fatGoal: DEFAULT_GOAL_LS.fats,
 } as const;
+
+/** Odpowiedź z `/api/parse-food` lub `/api/parse-food-image` */
+type AiParsedNutrition = {
+  name?: string;
+  kcal?: number;
+  protein?: number;
+  carbs?: number;
+  fat?: number;
+};
 
 export type Meal = {
   id: string;
@@ -129,7 +138,9 @@ export default function TodayTab() {
 
   const [mealInput, setMealInput] = useState("");
   const [mealLoading, setMealLoading] = useState(false);
+  const [mealImageLoading, setMealImageLoading] = useState(false);
   const [mealError, setMealError] = useState<string | null>(null);
+  const mealPhotoInputRef = useRef<HTMLInputElement>(null);
 
   const [manualLabel, setManualLabel] = useState("");
   const [manualKcalStr, setManualKcalStr] = useState("");
@@ -247,6 +258,61 @@ export default function TodayTab() {
       }
     },
     [supabase]
+  );
+
+  const insertAiParsedMealToSupabase = useCallback(
+    async (parsed: AiParsedNutrition, transcriptText: string): Promise<boolean> => {
+      try {
+        const {
+          data: { user },
+          error: authErr,
+        } = await supabase.auth.getUser();
+        if (authErr) console.error("[TodayTab] meal insert auth:", authErr.message);
+        if (!user) return false;
+
+        const today = new Date().toISOString().slice(0, 10);
+        setTodayKey(today);
+
+        const { data: inserted, error } = await supabase
+          .from("meals")
+          .insert({
+            user_id: user.id,
+            date: today,
+            name: typeof parsed.name === "string" ? parsed.name : "Posiłek",
+            kcal: typeof parsed.kcal === "number" ? Math.round(parsed.kcal) : 0,
+            protein:
+              typeof parsed.protein === "number" ? Math.round(parsed.protein) : 0,
+            carbs:
+              typeof parsed.carbs === "number" ? Math.round(parsed.carbs) : 0,
+            fat: typeof parsed.fat === "number" ? Math.round(parsed.fat) : 0,
+          })
+          .select("*")
+          .single();
+
+        if (error) {
+          console.error("[TodayTab] meal insert:", error.message);
+          setMealError(error.message);
+          return false;
+        }
+
+        const row = inserted as MealRowDb | null;
+        if (row) {
+          const [mapped] = mapMealsDb([row]);
+          if (mapped) {
+            mapped.text = transcriptText;
+          }
+          setMeals((prev) => (mapped ? [...prev, mapped] : prev));
+        }
+
+        await fetchWeekTotals(user.id, today);
+        return true;
+      } catch (err) {
+        console.error("[TodayTab] meal insert:", err);
+        setMealError("Brak połączenia lub błąd sieci.");
+        return false;
+      }
+    },
+    [supabase, fetchWeekTotals]
   );
 
   const hydrate = useCallback(async () => {
@@ -449,9 +515,6 @@ export default function TodayTab() {
       if (authErr) console.error("[TodayTab] meal add auth:", authErr.message);
       if (!user) return;
 
-      const today = new Date().toISOString().slice(0, 10);
-      setTodayKey(today);
-
       const res = await fetch("/api/parse-food", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -470,51 +533,76 @@ export default function TodayTab() {
         return;
       }
 
-      const parsed = (await res.json()) as {
-        name?: string;
-        kcal?: number;
-        protein?: number;
-        carbs?: number;
-        fat?: number;
-      };
-
-      const { data: inserted, error } = await supabase
-        .from("meals")
-        .insert({
-          user_id: user.id,
-          date: today,
-          name: typeof parsed.name === "string" ? parsed.name : "Posiłek",
-          kcal: typeof parsed.kcal === "number" ? Math.round(parsed.kcal) : 0,
-          protein: typeof parsed.protein === "number" ? Math.round(parsed.protein) : 0,
-          carbs: typeof parsed.carbs === "number" ? Math.round(parsed.carbs) : 0,
-          fat: typeof parsed.fat === "number" ? Math.round(parsed.fat) : 0,
-        })
-        .select("*")
-        .single();
-
-      if (error) {
-        console.error("[TodayTab] meal insert:", error.message);
-        setMealError(error.message);
-        return;
-      }
-
-      const row = inserted as MealRowDb | null;
-      if (row) {
-        const [mapped] = mapMealsDb([row]);
-        if (mapped) {
-          mapped.text = text;
-        }
-        setMeals((prev) => (mapped ? [...prev, mapped] : prev));
-      }
-
-      setMealInput("");
-      await fetchWeekTotals(user.id, today);
+      const parsed = (await res.json()) as AiParsedNutrition;
+      const ok = await insertAiParsedMealToSupabase(parsed, text);
+      if (ok) setMealInput("");
     } catch (err) {
       console.error("[TodayTab] meal add:", err);
       setMealError("Brak połączenia lub błąd sieci.");
     } finally {
       setMealLoading(false);
     }
+  }
+
+  function handleMealPhotoChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setMealError(null);
+    setMealImageLoading(true);
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      void (async () => {
+        try {
+          const dataUrl = ev.target?.result as string | undefined;
+          const base64 = dataUrl?.split(",")[1];
+          if (!base64) {
+            setMealError("Nie udało się odczytać zdjęcia.");
+            return;
+          }
+
+          const res = await fetch("/api/parse-food-image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              image: base64,
+              media_type: file.type || "image/jpeg",
+            }),
+          });
+
+          const parsed = (await res.json()) as AiParsedNutrition & { error?: string };
+
+          if (!res.ok || typeof parsed.error === "string") {
+            console.error("[TodayTab] parse-food-image:", parsed.error ?? res.status);
+            setMealError(
+              typeof parsed.error === "string"
+                ? parsed.error
+                : "Nie udało przeanalizować zdjęcia."
+            );
+            return;
+          }
+
+          const label =
+            typeof parsed.name === "string" && parsed.name.trim()
+              ? parsed.name.trim()
+              : "Ze zdjęcia";
+          await insertAiParsedMealToSupabase(parsed, `[zdjęcie] ${label}`);
+        } catch (err) {
+          console.error("[TodayTab] parse-food-image:", err);
+          setMealError("Błąd sieci przy analizie zdjęcia.");
+        } finally {
+          setMealImageLoading(false);
+        }
+      })();
+    };
+    reader.onerror = () => {
+      console.error("[TodayTab] FileReader error");
+      setMealImageLoading(false);
+      setMealError("Nie udało się wczytać pliku.");
+    };
+    reader.readAsDataURL(file);
   }
 
   async function handleAddMealManual(e: React.FormEvent) {
@@ -785,7 +873,7 @@ export default function TodayTab() {
           <strong className="text-white/55">AI</strong> szacuje makra z opisu;{" "}
           <strong className="text-white/55">własne kcal</strong> — gdy znasz wartość z opakowania
           lub innego źródła. <strong className="text-white/55">Mów</strong> przy polu opisu zamienia
-          mowę na tekst.
+          mowę na tekst. <strong className="text-white/55">Aparat</strong> 📷 ocenia makra ze zdjęcia.
         </p>
         <div
           className="mb-3 flex rounded-xl border border-white/12 bg-black/25 p-0.5"
@@ -827,6 +915,15 @@ export default function TodayTab() {
         </div>
         {mealEntryMode === "ai" ? (
           <form onSubmit={(e) => void handleAddMeal(e)} className="space-y-3">
+            <input
+              ref={mealPhotoInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="sr-only hidden"
+              onChange={handleMealPhotoChange}
+              aria-hidden
+            />
             <div className="flex gap-2">
               <input
                 type="text"
@@ -834,10 +931,20 @@ export default function TodayTab() {
                 onChange={(e) => setMealInput(e.target.value)}
                 placeholder="np. owsianka z bananem, 2 jajka, jogurt..."
                 className="min-w-0 flex-1 rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
-                disabled={mealLoading}
+                disabled={mealLoading || mealImageLoading}
               />
+              <button
+                type="button"
+                disabled={mealLoading || mealImageLoading}
+                onClick={() => mealPhotoInputRef.current?.click()}
+                aria-label="Dodaj zdjęcie posiłku"
+                title="Zdjęcie → AI"
+                className="touch-manipulation shrink-0 whitespace-nowrap rounded-xl border border-white/25 bg-transparent px-4 py-3 text-lg transition hover:border-[#EF9F27]/50 hover:bg-white/5 disabled:opacity-45"
+              >
+                📷
+              </button>
               <VoiceDictationButton
-                disabled={mealLoading}
+                disabled={mealLoading || mealImageLoading}
                 onAppendTranscript={(t) =>
                   setMealInput((prev) =>
                     prev.trim() ? `${prev.trim()} ${t}` : t
@@ -845,9 +952,12 @@ export default function TodayTab() {
                 }
               />
             </div>
+            {mealImageLoading ? (
+              <p className="text-center text-xs text-white/50">Analizuję zdjęcie...</p>
+            ) : null}
             <button
               type="submit"
-              disabled={mealLoading}
+              disabled={mealLoading || mealImageLoading}
               className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5 disabled:opacity-55"
             >
               {mealLoading ? "Parsowanie…" : "Dodaj posiłek"}

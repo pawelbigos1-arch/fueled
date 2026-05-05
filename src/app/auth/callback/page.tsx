@@ -39,6 +39,23 @@ export default function AuthCallbackPage() {
       }
     };
 
+    /** Licznik użytkowników — synch z `user_profiles` (route.ts zająłby to samo `auth/callback` co `page.tsx` w Next.js). */
+    async function upsertUserProfileIntoDirectory() {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user) return;
+        const { error } = await supabase.from("user_profiles").upsert(
+          { id: user.id, email: user.email ?? "" },
+          { onConflict: "id" }
+        );
+        if (error) console.error("[auth callback] user_profiles:", error.message);
+      } catch (e) {
+        console.error("[auth callback] user_profiles:", e);
+      }
+    }
+
     const run = async () => {
       const search = new URLSearchParams(window.location.search);
       const hashParams = new URLSearchParams(
@@ -51,6 +68,7 @@ export default function AuthCallbackPage() {
 
       if (code) {
         const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (!error) await upsertUserProfileIntoDirectory();
         finish(!error);
         return;
       }
@@ -60,6 +78,7 @@ export default function AuthCallbackPage() {
           type: typeRaw as EmailOtpType,
           token_hash: tokenHash,
         });
+        if (!error) await upsertUserProfileIntoDirectory();
         finish(!error);
         return;
       }
@@ -67,6 +86,7 @@ export default function AuthCallbackPage() {
       for (let i = 0; i < 5; i += 1) {
         const { data: { session } } = await supabase.auth.getSession();
         if (session) {
+          await upsertUserProfileIntoDirectory();
           finish(true);
           return;
         }

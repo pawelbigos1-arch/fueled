@@ -42,18 +42,42 @@ function displayNameFromUser(user: User) {
   return fromFull || fromName || nick || "Użytkownik";
 }
 
+const ADMIN_STATS_EMAIL = "pawelbigos1@gmail.com";
+
 export default function AppPage() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<TabId>("today");
   const [userLabel, setUserLabel] = useState<string>("");
+  const [adminUserCount, setAdminUserCount] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const supabase = createClient();
-    void supabase.auth.getUser().then(({ data: { user } }) => {
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
       if (cancelled || !user) return;
       setUserLabel(displayNameFromUser(user));
-    });
+
+      const emailLc = typeof user.email === "string" ? user.email.toLowerCase() : "";
+      if (emailLc !== ADMIN_STATS_EMAIL) return;
+
+      let total: number | null = null;
+      const rpc = await supabase.rpc("admin_user_profiles_count");
+      if (!rpc.error && rpc.data !== null && rpc.data !== undefined) {
+        total = Number(rpc.data);
+      } else {
+        if (rpc.error)
+          console.error("[AppPage] admin_user_profiles_count RPC:", rpc.error.message);
+        const { count, error } = await supabase
+          .from("user_profiles")
+          .select("*", { count: "exact", head: true });
+        if (error) console.error("[AppPage] user_profiles count fallback:", error.message);
+        if (!error && count !== null) total = count;
+      }
+      if (!cancelled && total !== null && Number.isFinite(total)) setAdminUserCount(total);
+    })();
     return () => {
       cancelled = true;
     };
@@ -91,13 +115,24 @@ export default function AppPage() {
               <p className="text-[13px] capitalize leading-tight text-white/52">
                 {formatTodayPl()}
               </p>
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="touch-manipulation min-h-[44px] min-w-[44px] px-2 py-2 text-[12px] text-white/50 underline-offset-4 active:bg-white/[0.06] sm:hover:text-white/85 sm:hover:underline"
-              >
-                Wyloguj
-              </button>
+              <div className="flex flex-row flex-wrap items-center justify-end gap-2">
+                {adminUserCount !== null ? (
+                  <span
+                    className="rounded-md border border-white/15 bg-black/25 px-2 py-1 text-[11px] tabular-nums text-white/70"
+                    title="Liczba rekordów w user_profiles"
+                    aria-label={`Liczba użytkowników w aplikacji: ${adminUserCount}`}
+                  >
+                    👥 {adminUserCount}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="touch-manipulation min-h-[44px] min-w-[44px] px-2 py-2 text-[12px] text-white/50 underline-offset-4 active:bg-white/[0.06] sm:hover:text-white/85 sm:hover:underline"
+                >
+                  Wyloguj
+                </button>
+              </div>
             </div>
           </div>
 

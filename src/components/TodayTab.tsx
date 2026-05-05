@@ -148,6 +148,10 @@ function parseGramInput(raw: string): number {
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
 }
 
+function caloriesFromSteps(steps: number, weightKg: number): number {
+  return Math.round((steps / 1000) * (weightKg * 0.5));
+}
+
 /** YYYY-MM-DD (UTC) + delta dni — spójnie z `toISOString().slice(0, 10)` */
 function addDaysUtcYmd(ymd: string, deltaDays: number): string {
   const [y, m, d] = ymd.split("-").map((x) => parseInt(x, 10));
@@ -194,6 +198,11 @@ export default function TodayTab() {
 
   const [activityText, setActivityText] = useState("");
   const [activityKcal, setActivityKcal] = useState("");
+  const [stepsStr, setStepsStr] = useState("");
+  const [stepsWeightManualStr, setStepsWeightManualStr] = useState("");
+  const [stepsSaving, setStepsSaving] = useState(false);
+  const [stepsError, setStepsError] = useState<string | null>(null);
+  const [latestWeightKg, setLatestWeightKg] = useState<number | null>(null);
 
   const [todayKey, setTodayKey] = useState(() =>
     new Date().toISOString().slice(0, 10)
@@ -373,6 +382,7 @@ export default function TodayTab() {
         setMeals([]);
         setWorkouts([]);
         setWeekAgg({});
+        setLatestWeightKg(null);
         applyGoals(null);
         return;
       }
@@ -427,12 +437,28 @@ export default function TodayTab() {
         );
       }
 
+      const { data: metrics, error: emetrics } = await supabase
+        .from("body_metrics")
+        .select("weight_kg")
+        .eq("user_id", user.id)
+        .order("date", { ascending: false })
+        .limit(1)
+        .single();
+      if (emetrics) {
+        console.error("[TodayTab] body_metrics:", emetrics.message);
+        setLatestWeightKg(null);
+      } else {
+        const w = Number((metrics as { weight_kg?: number } | null)?.weight_kg);
+        setLatestWeightKg(Number.isFinite(w) && w > 0 ? w : null);
+      }
+
       await fetchWeekTotals(user.id, today);
     } catch (e) {
       console.error("[TodayTab] hydrate:", e);
       setMeals([]);
       setWorkouts([]);
       setWeekAgg({});
+      setLatestWeightKg(null);
       applyGoals(null);
     } finally {
       setGoalsLoading(false);
@@ -787,6 +813,84 @@ export default function TodayTab() {
       await fetchWeekTotals(user.id, today);
     } catch (err) {
       console.error("[TodayTab] meal delete:", err);
+    }
+  }
+
+  async function handleAddSteps(e: React.FormEvent) {
+    e.preventDefault();
+    setStepsError(null);
+
+    const steps = Number.parseInt(stepsStr.trim(), 10);
+    if (!Number.isFinite(steps) || steps <= 0) return;
+
+    const manualWeight = Number.parseFloat(
+      stepsWeightManualStr.replace(",", ".").trim()
+    );
+    const weightKg =
+      latestWeightKg && latestWeightKg > 0
+        ? latestWeightKg
+        : Number.isFinite(manualWeight) && manualWeight > 0
+          ? manualWeight
+          : null;
+
+    if (!weightKg) {
+      setStepsError("Podaj wagę aby przeliczyć kroki.");
+      return;
+    }
+
+    setStepsSaving(true);
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] steps auth:", authErr.message);
+      if (!user) return;
+
+      const today = new Date().toISOString().slice(0, 10);
+      setTodayKey(today);
+
+      const kcalBurned = caloriesFromSteps(steps, weightKg);
+      const weightLabel = Number.isInteger(weightKg)
+        ? String(weightKg)
+        : weightKg.toFixed(1);
+      const activityName = `Kroki — ${steps} kroków (${weightLabel} kg)`;
+
+      const { data: inserted, error } = await supabase
+        .from("activities")
+        .insert({
+          user_id: user.id,
+          date: today,
+          name: activityName,
+          kcal_burned: kcalBurned,
+        })
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error("[TodayTab] steps insert:", error.message);
+        setStepsError(error.message);
+        return;
+      }
+
+      const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
+      if (r) {
+        setWorkouts((prev) => [
+          ...prev,
+          {
+            id: r.id,
+            description: r.name,
+            caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+          },
+        ]);
+      }
+      setStepsStr("");
+      await fetchWeekTotals(user.id, today);
+    } catch (err) {
+      console.error("[TodayTab] steps insert:", err);
+      setStepsError("Nie udało się dodać kroków.");
+    } finally {
+      setStepsSaving(false);
     }
   }
 
@@ -1224,6 +1328,55 @@ export default function TodayTab() {
             ))}
           </ul>
         )}
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/80">
+          KROKI
+        </h2>
+        <form onSubmit={(e) => void handleAddSteps(e)} className="space-y-3">
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            value={stepsStr}
+            onChange={(e) => setStepsStr(e.target.value)}
+            placeholder="Liczba kroków (np. 8500)"
+            className="w-full rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-lg font-semibold text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+            disabled={stepsSaving}
+          />
+          <p className="text-[11px] leading-snug text-white/45">
+            Kalorie liczone na podstawie Twojej wagi.
+          </p>
+          {latestWeightKg === null ? (
+            <div className="space-y-1">
+              <p className="text-[11px] text-amber-300">Podaj wagę aby przeliczyć kroki.</p>
+              <input
+                type="number"
+                inputMode="decimal"
+                min={1}
+                step="0.1"
+                value={stepsWeightManualStr}
+                onChange={(e) => setStepsWeightManualStr(e.target.value)}
+                placeholder="Waga (kg)"
+                className="w-full rounded-xl border border-white/15 bg-[#1E1E1E] px-3 py-3 text-sm text-white outline-none placeholder:text-white/35 focus:border-[#EF9F27]/60"
+                disabled={stepsSaving}
+              />
+            </div>
+          ) : (
+            <p className="text-[11px] text-white/50">
+              Aktualna waga do przeliczeń: {latestWeightKg} kg
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={stepsSaving}
+            className="w-full rounded-xl border border-white/25 bg-transparent py-3 text-sm font-medium text-white transition hover:border-white hover:bg-white/5 disabled:opacity-55"
+          >
+            {stepsSaving ? "Dodawanie…" : "Dodaj kroki"}
+          </button>
+          {stepsError ? <p className="text-xs text-red-400">{stepsError}</p> : null}
+        </form>
       </section>
 
       <section>

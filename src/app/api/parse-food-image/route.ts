@@ -4,6 +4,11 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
+    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    if (!apiKey) {
+      return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
+    }
+
     const body = (await request.json()) as {
       image?: string;
       media_type?: string;
@@ -18,26 +23,23 @@ export async function POST(request: NextRequest) {
         ? body.media_type
         : "image/jpeg";
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY!,
-        "anthropic-version": "2023-06-01",
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "gpt-4o",
         max_tokens: 300,
         messages: [
           {
             role: "user",
             content: [
               {
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: mediaType,
-                  data: image,
+                type: "image_url",
+                image_url: {
+                  url: `data:${mediaType};base64,${image}`,
                 },
               },
               {
@@ -58,7 +60,7 @@ export async function POST(request: NextRequest) {
 
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
-      console.error("[parse-food-image] Anthropic:", response.status, errText);
+      console.error("[parse-food-image] OpenAI:", response.status, errText);
       return NextResponse.json(
         { error: "Model request failed" },
         { status: 502 }
@@ -66,9 +68,9 @@ export async function POST(request: NextRequest) {
     }
 
     const data = (await response.json()) as {
-      content?: Array<{ text?: string }>;
+      choices?: Array<{ message?: { content?: string } }>;
     };
-    const raw = data.content?.[0]?.text || "{}";
+    const raw = data.choices?.[0]?.message?.content || "{}";
     const clean = raw.replace(/```json?|```/g, "").trim();
     const parsed = JSON.parse(clean) as unknown;
     return NextResponse.json(parsed);

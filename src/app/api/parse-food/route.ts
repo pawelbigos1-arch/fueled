@@ -70,9 +70,9 @@ function parseNutritionJson(raw: string): ParseFoodResult | null {
 }
 
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
-    return NextResponse.json({ error: "Missing ANTHROPIC_API_KEY" }, { status: 500 });
+    return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
   }
 
   let body: unknown;
@@ -94,44 +94,44 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Missing or empty text" }, { status: 400 });
   }
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "gpt-4o-mini",
       max_tokens: 300,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: text }],
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: text },
+      ],
     }),
   });
 
   const rawBody = await response.text();
-  console.log("[parse-food] Anthropic status:", response.status, "body:", rawBody);
+  console.log("[parse-food] OpenAI status:", response.status, "body:", rawBody);
 
   if (!response.ok) {
     return NextResponse.json(
       {
-        error: "Anthropic request failed",
+        error: "OpenAI request failed",
         status: response.status,
-        anthropic_body: rawBody.slice(0, 2000),
+        openai_body: rawBody.slice(0, 2000),
       },
       { status: 502 }
     );
   }
 
-  let data: { content?: { type?: string; text?: string }[] };
+  let data: { choices?: { message?: { content?: string } }[] };
   try {
     data = JSON.parse(rawBody) as typeof data;
   } catch {
-    return NextResponse.json({ error: "Invalid JSON from Anthropic" }, { status: 502 });
+    return NextResponse.json({ error: "Invalid JSON from OpenAI" }, { status: 502 });
   }
 
-  const assistantText =
-    data.content?.find((block) => block.type === "text")?.text?.trim() ?? "";
+  const assistantText = data.choices?.[0]?.message?.content?.trim() ?? "";
 
   const parsed = parseNutritionJson(assistantText);
 

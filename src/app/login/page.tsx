@@ -6,8 +6,16 @@ import { createClient } from "@/lib/supabase";
 import { getPublicSiteUrl } from "@/lib/site-url";
 
 function signInErrorMessage(message: string): string {
-  if (message.trim() === "email rate limit exceeded") {
+  const trimmed = message.trim();
+  if (trimmed === "email rate limit exceeded") {
     return "Za dużo wiadomości na ten adres — poczekaj chwilę albo sprawdź SMTP w Supabase.";
+  }
+  if (
+    trimmed === "Load failed" ||
+    trimmed === "Failed to fetch" ||
+    trimmed.toLowerCase().includes("network")
+  ) {
+    return "Nie można połączyć z Supabase. Sprawdź, czy projekt istnieje i czy NEXT_PUBLIC_SUPABASE_URL jest poprawny.";
   }
   return message;
 }

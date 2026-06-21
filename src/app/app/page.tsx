@@ -9,8 +9,9 @@ import PlanTab from "@/components/PlanTab";
 import LogTab from "@/components/LogTab";
 import GoalTab from "@/components/GoalTab";
 import AnalysisTab from "@/components/AnalysisTab";
+import GrowthTab from "@/components/GrowthTab";
 
-type TabId = "today" | "plan" | "log" | "goal" | "analysis";
+type TabId = "today" | "plan" | "log" | "goal" | "analysis" | "growth";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "today", label: "Dziś", icon: "☀️" },
@@ -18,6 +19,7 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "log", label: "Dziennik", icon: "🏋️" },
   { id: "goal", label: "Cel", icon: "🎯" },
   { id: "analysis", label: "Analiza", icon: "📊" },
+  { id: "growth", label: "Rozwój", icon: "🧠" },
 ];
 
 function formatTodayPl(): string {
@@ -170,6 +172,7 @@ export default function AppPage() {
           {activeTab === "log" ? <LogTab /> : null}
           {activeTab === "goal" ? <GoalTab /> : null}
           {activeTab === "analysis" ? <AnalysisTab /> : null}
+          {activeTab === "growth" ? <GrowthTab /> : null}
         </main>
       </div>
     </div>

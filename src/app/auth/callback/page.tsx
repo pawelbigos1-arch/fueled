@@ -6,9 +6,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 /**
- * Magic link often returns tokens in URL hash (#…) — the server never sees that.
- * Route Handlers that redirect on "missing code" break this flow. Client handles
- * PKCE ?code=, ?token_hash=&type=email, and implicit hash tokens via detectSessionInUrl.
+ * Obsługa potwierdzenia emaila po rejestracji (PKCE ?code=) oraz legacy OTP.
+ * Logowanie email+hasło nie wymaga tej strony — tylko link z maila potwierdzającego.
  */
 export default function AuthCallbackPage() {
   const router = useRouter();

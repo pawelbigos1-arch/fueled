@@ -30,7 +30,11 @@ export default function AuthCallbackPage() {
       },
     });
 
-    const finish = (ok: boolean) => {
+    const finish = (ok: boolean, recovery = false) => {
+      if (ok && recovery) {
+        router.replace("/auth/reset-password");
+        return;
+      }
       if (ok) router.replace("/app");
       else {
         setStatus("error");
@@ -64,11 +68,12 @@ export default function AuthCallbackPage() {
       const code = search.get("code");
       const tokenHash = search.get("token_hash") ?? hashParams.get("token_hash");
       const typeRaw = search.get("type") ?? hashParams.get("type");
+      const isRecovery = typeRaw === "recovery";
 
       if (code) {
         const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (!error) await upsertUserProfileIntoDirectory();
-        finish(!error);
+        if (!error && !isRecovery) await upsertUserProfileIntoDirectory();
+        finish(!error, isRecovery);
         return;
       }
 
@@ -77,8 +82,8 @@ export default function AuthCallbackPage() {
           type: typeRaw as EmailOtpType,
           token_hash: tokenHash,
         });
-        if (!error) await upsertUserProfileIntoDirectory();
-        finish(!error);
+        if (!error && typeRaw !== "recovery") await upsertUserProfileIntoDirectory();
+        finish(!error, typeRaw === "recovery");
         return;
       }
 

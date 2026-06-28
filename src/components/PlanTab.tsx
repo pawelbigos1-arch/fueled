@@ -388,42 +388,30 @@ export default function PlanTab() {
       const meal = plan.find((m) => String(m.id) === String(mid));
       if (!meal || meal.eaten) return;
 
+      const { error: rpcErr } = await supabase.rpc("confirm_plan_meal", {
+        p_plan_date: day,
+        p_meal_id: String(meal.id),
+        p_name: meal.label || meal.text,
+        p_kcal: meal.calories,
+        p_protein: meal.protein_g,
+        p_carbs: meal.carbs_g,
+        p_fat: meal.fat_g,
+      });
+
+      if (rpcErr) {
+        console.error("[PlanTab] confirm_plan_meal:", rpcErr.message);
+        setParseError("Nie udało się potwierdzić posiłku. Spróbuj ponownie.");
+        return;
+      }
+
       const nextPlan = plan.map((m) =>
         String(m.id) === String(mid) ? { ...m, eaten: true } : m
       );
-
-      const { error: upErr } = await supabase.from("meal_plans").upsert(
-        {
-          user_id: user.id,
-          date: day,
-          meals: planMealsToJson(nextPlan),
-          status: "draft",
-        },
-        { onConflict: "user_id,date" }
-      );
-      if (upErr) {
-        console.error("[PlanTab] confirm → meal_plans:", upErr.message);
-        return;
-      }
-
-      const { error: insErr } = await supabase.from("meals").insert({
-        user_id: user.id,
-        date: day,
-        name: meal.label || meal.text,
-        kcal: meal.calories,
-        protein: meal.protein_g,
-        carbs: meal.carbs_g,
-        fat: meal.fat_g,
-      });
-
-      if (insErr) {
-        console.error("[PlanTab] confirm → meals:", insErr.message);
-        return;
-      }
-
       setPlan(nextPlan);
+      setParseError(null);
     } catch (err) {
       console.error("[PlanTab] confirm:", err);
+      setParseError("Błąd połączenia przy potwierdzaniu posiłku.");
     }
   }
 

@@ -17,6 +17,18 @@ import {
   isDateKeyInRange,
 } from "@/lib/date-range";
 import ExerciseMaxChart from "@/components/ExerciseMaxChart";
+import RunEntryForm, { type RunEntryValues } from "@/components/RunEntryForm";
+import ExerciseEntryForm from "@/components/ExerciseEntryForm";
+import {
+  MEASUREMENT_PROFILE_LABELS,
+  chartLabelForProfile,
+  chartUnitForProfile,
+  formatSetLabelForProfile,
+  inferProfileFromSet,
+  maxChartValueForSets,
+  resolveExerciseProfile,
+  type MeasurementProfile,
+} from "@/lib/measurement-profiles";
 
 const RANGES: StatsRange[] = [
   "7d",
@@ -50,24 +62,42 @@ function saveDict(d: DictStore) {
   localStorage.setItem(LS_DICT, JSON.stringify(d));
 }
 
-function setsToJsonDb(sets: LogSet[]): { reps: number; weight: number; series?: number }[] {
-  return sets.map((s) => ({
-    reps: s.reps,
-    weight: s.weight,
-    series: s.series,
-  }));
+function setsToJsonDb(sets: LogSet[]): Record<string, unknown>[] {
+  return sets.map((s) => {
+    const out: Record<string, unknown> = {
+      series: s.series ?? 1,
+    };
+    if (s.reps != null) out.reps = s.reps;
+    if (s.weight != null) out.weight = s.weight;
+    if (s.distance_km != null) out.distance_km = s.distance_km;
+    if (s.duration_sec != null) out.duration_sec = s.duration_sec;
+    if (s.pace_min_per_km != null) out.pace_min_per_km = s.pace_min_per_km;
+    if (s.steps != null) out.steps = s.steps;
+    if (s.kcal_burned != null) out.kcal_burned = s.kcal_burned;
+    if (s.negative_duration_sec != null) {
+      out.negative_duration_sec = s.negative_duration_sec;
+    }
+    return out;
+  });
 }
 
 function setsFromJsonDb(raw: unknown): LogSet[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((item) => {
-    const x = item as { reps?: number; weight?: number; series?: number };
+    const x = item as Record<string, unknown>;
     const series = Math.max(1, Math.round(Number(x.series) || 1));
-    return {
-      reps: Math.round(Number(x.reps) || 0),
-      weight: Number.isFinite(Number(x.weight)) ? Number(x.weight) : 0,
-      series,
-    };
+    const set: LogSet = { series };
+    if (Number.isFinite(Number(x.reps))) set.reps = Math.round(Number(x.reps));
+    if (Number.isFinite(Number(x.weight))) set.weight = Number(x.weight);
+    if (Number.isFinite(Number(x.distance_km))) set.distance_km = Number(x.distance_km);
+    if (Number.isFinite(Number(x.duration_sec))) set.duration_sec = Math.round(Number(x.duration_sec));
+    if (Number.isFinite(Number(x.pace_min_per_km))) set.pace_min_per_km = Number(x.pace_min_per_km);
+    if (Number.isFinite(Number(x.steps))) set.steps = Math.round(Number(x.steps));
+    if (Number.isFinite(Number(x.kcal_burned))) set.kcal_burned = Math.round(Number(x.kcal_burned));
+    if (Number.isFinite(Number(x.negative_duration_sec))) {
+      set.negative_duration_sec = Math.round(Number(x.negative_duration_sec));
+    }
+    return set;
   });
 }
 
@@ -77,6 +107,7 @@ type WorkoutRowDb = {
   exercise: string;
   category: string;
   sets: unknown;
+  measurement_profile?: string | null;
 };
 
 function rowToEntry(r: WorkoutRowDb): LogEntry {
@@ -89,39 +120,18 @@ function rowToEntry(r: WorkoutRowDb): LogEntry {
   };
 }
 
-function chipLabel(s: LogSet, repsMode: boolean): string {
-  const r = Number.isFinite(s.reps) ? s.reps : 0;
-  const se = Number.isFinite(s.series) ? s.series : 0;
-  if (repsMode) return `${se}×${r} powt.`;
-  const w = Number.isFinite(s.weight) ? s.weight : 0;
-  return `${se}×${r} / ${w}kg`;
-}
-
-function maxKgForSets(sets: LogSet[]): number {
-  let m = 0;
-  sets.forEach((s) => {
-    if (!Number.isFinite(s.weight)) return;
-    m = Math.max(m, s.weight);
-  });
-  return m;
-}
-
-function maxRepsForSets(sets: LogSet[]): number {
-  let m = 0;
-  sets.forEach((s) => {
-    if (!Number.isFinite(s.reps)) return;
-    m = Math.max(m, s.reps);
-  });
-  return m;
-}
-
-function exerciseUsesReps(
+function displayProfileForEntry(
   dict: DictStore,
-  cat: ExerciseCategory | string,
-  name: string
-) {
-  const row = dict[cat as ExerciseCategory];
-  return row?.find((e) => e.name === name)?.progressBy === "reps";
+  category: string,
+  exercise: string,
+  sets: LogSet[]
+): MeasurementProfile {
+  const fromDict = resolveExerciseProfile(dict, category, exercise);
+  if (sets.length > 0) {
+    const inferred = inferProfileFromSet(sets[0]);
+    if (inferred === "running" || inferred === "farmer_carry") return inferred;
+  }
+  return fromDict;
 }
 
 export default function LogTab() {
@@ -143,12 +153,12 @@ export default function LogTab() {
 
   const [category, setCategory] = useState<ExerciseCategory>("Klatka");
   const [exerciseSel, setExerciseSel] = useState<string>("");
-  const [wStr, setWStr] = useState("");
-  const [repStr, setRepStr] = useState("");
-  const [serieStr, setSerieStr] = useState("");
   const [chips, setChips] = useState<string[]>([]);
   const [chipSets, setChipSets] = useState<LogSet[]>([]);
+  const [formError, setFormError] = useState<string | null>(null);
   const [chartRange, setChartRange] = useState<StatsRange>("14d");
+  const [runSaving, setRunSaving] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
 
   const [dictNewName, setDictNewName] = useState("");
   const [dictCategory, setDictCategory] = useState<ExerciseCategory>("Klatka");
@@ -295,10 +305,6 @@ export default function LogTab() {
     void hydrate();
   }, [reloadWorkoutLogs, reloadCalendarMarks, reloadMealCountsForHistory]);
 
-  useEffect(() => {
-    if (exerciseUsesReps(dict, category, exerciseSel)) setWStr("");
-  }, [dict, category, exerciseSel]);
-
   const persistDict = (next: DictStore) => {
     const merged = mergeDictWithDefaults(next);
     setDict(merged);
@@ -325,18 +331,20 @@ export default function LogTab() {
     persistDict(next);
   }
 
-  function toggleExerciseProgressBy(cat: ExerciseCategory, name: string) {
+  function setExerciseProfile(
+    cat: ExerciseCategory,
+    name: string,
+    profile: MeasurementProfile
+  ) {
     const next: DictStore = { ...dict, [cat]: [...(dict[cat] ?? [])] };
     const arr = [...(next[cat] ?? [])];
     const i = arr.findIndex((x) => x.name === name);
     if (i < 0) return;
-    const cur = arr[i];
-    if (cur.progressBy === "reps") {
-      const { progressBy: _p, ...rest } = cur;
-      arr[i] = rest;
-    } else {
-      arr[i] = { ...cur, progressBy: "reps" };
-    }
+    arr[i] = {
+      ...arr[i],
+      measurementProfile: profile,
+      progressBy: profile === "bodyweight" ? "reps" : undefined,
+    };
     next[cat] = arr;
     persistDict(next);
   }
@@ -354,7 +362,10 @@ export default function LogTab() {
     if (exists) return;
     persistDict({
       ...dict,
-      [cat]: [...(dict[cat] ?? []), { name: n, visible: true }],
+      [cat]: [
+        ...(dict[cat] ?? []),
+        { name: n, visible: true, measurementProfile: "strength_standard" },
+      ],
     });
     setDictNewName("");
   }
@@ -395,15 +406,20 @@ export default function LogTab() {
     return rows;
   }, [logs, mealCountByDate]);
 
-  const exerciseRepsMode = useMemo(
-    () => exerciseUsesReps(dict, category, exerciseSel),
+  const activeProfile = useMemo(
+    () =>
+      exerciseSel
+        ? resolveExerciseProfile(dict, category, exerciseSel)
+        : "strength_standard",
     [dict, category, exerciseSel]
   );
+
+  const isRunningExercise = activeProfile === "running";
 
   const chartPoints = useMemo(() => {
     if (!exerciseSel || !mounted) return [];
     const end = new Date();
-    const repsMode = exerciseUsesReps(dict, category, exerciseSel);
+    const profile = activeProfile;
 
     type Bucket = Record<string, number>;
     const byDayMax: Bucket = {};
@@ -416,7 +432,7 @@ export default function LogTab() {
           isDateKeyInRange(e.date, chartRange, end)
       )
       .forEach((e) => {
-        const mx = repsMode ? maxRepsForSets(e.sets) : maxKgForSets(e.sets);
+        const mx = maxChartValueForSets(e.sets, profile);
         byDayMax[e.date] = Math.max(byDayMax[e.date] ?? 0, mx);
       });
 
@@ -427,28 +443,15 @@ export default function LogTab() {
           day: "numeric",
           month: "short",
         }),
-        value: Math.round(v),
+        value: profile === "running" ? Math.round(v * 100) / 100 : Math.round(v),
       }));
-  }, [logs, exerciseSel, category, chartRange, mounted, dict]);
+  }, [logs, exerciseSel, category, chartRange, mounted, activeProfile]);
 
   /** --- persist series --- */
 
-  function addChip() {
-    const r = Number.parseInt(repStr, 10);
-    const se = Number.parseInt(serieStr, 10);
-    if (!Number.isFinite(r) || !Number.isFinite(se)) return;
-
-    const repsMode = exerciseUsesReps(dict, category, exerciseSel);
-    let w = 0;
-    if (!repsMode) {
-      const parsed = Number(wStr.replace(",", "."));
-      if (!Number.isFinite(parsed)) return;
-      w = parsed;
-    }
-
-    const setObj: LogSet = { weight: w, reps: r, series: se };
-    setChipSets((c) => [...c, setObj]);
-    setChips((c) => [...c, chipLabel(setObj, repsMode)]);
+  function handleAddSet(set: LogSet, label: string) {
+    setChipSets((c) => [...c, set]);
+    setChips((c) => [...c, label]);
   }
 
   async function saveExerciseDay() {
@@ -468,25 +471,73 @@ export default function LogTab() {
         exercise: exerciseSel,
         category,
         sets: setsToJsonDb(chipSets),
+        measurement_profile: activeProfile,
       })
-      .select("id,date,exercise,category,sets")
+      .select("id,date,exercise,category,sets,measurement_profile")
       .maybeSingle();
 
     if (error) {
-      console.error("[LogTab] workout insert:", error.message);
-      return;
+      const { data: fallback, error: fbErr } = await sb
+        .from("workout_log")
+        .insert({
+          user_id: user.id,
+          date: dailyDateKey,
+          exercise: exerciseSel,
+          category,
+          sets: setsToJsonDb(chipSets),
+        })
+        .select("id,date,exercise,category,sets")
+        .maybeSingle();
+      if (fbErr) {
+        console.error("[LogTab] workout insert:", fbErr.message);
+        return;
+      }
+      const row = fallback as WorkoutRowDb | null;
+      if (row) setLogs((prev) => [rowToEntry(row), ...prev]);
+    } else {
+      const row = data as WorkoutRowDb | null;
+      if (row) setLogs((prev) => [rowToEntry(row), ...prev]);
     }
-
-    const row = data as WorkoutRowDb | null;
-    if (row) setLogs((prev) => [rowToEntry(row), ...prev]);
 
     setChips([]);
     setChipSets([]);
-    setWStr("");
-    setRepStr("");
-    setSerieStr("");
+    setFormError(null);
 
     await reloadCalendarMarks();
+  }
+
+  async function handleSaveRunFromLog(values: RunEntryValues) {
+    setRunError(null);
+    setRunSaving(true);
+    try {
+      const sb = createClient();
+      const {
+        data: { user },
+      } = await sb.auth.getUser();
+      if (!user) return;
+
+      const totalDurationSec = values.durationMin * 60 + values.durationSec;
+
+      const { error } = await sb.rpc("log_run_dual", {
+        p_date: dailyDateKey,
+        p_kcal_burned: values.kcalBurned,
+        p_distance_km: values.distanceKm,
+        p_duration_sec: totalDurationSec,
+        p_pace_min_per_km: values.paceMinPerKm,
+      });
+
+      if (error) {
+        console.error("[LogTab] log_run_dual:", error.message);
+        setRunError(error.message);
+        return;
+      }
+
+      await reloadWorkoutLogs();
+      await reloadCalendarMarks();
+      setExerciseSel("");
+    } finally {
+      setRunSaving(false);
+    }
   }
 
   /** --- calendar cell styles --- */
@@ -586,22 +637,26 @@ export default function LogTab() {
                     {exItem.name}
                   </span>
                 </div>
-                <label
-                  className="flex shrink-0 cursor-pointer items-center gap-1.5 touch-manipulation py-1"
-                  title="Powtórzenia zamiast kg — wykres i log bez ciężaru"
+                <select
+                  value={exItem.measurementProfile ?? "strength_standard"}
+                  onChange={(e) =>
+                    setExerciseProfile(
+                      dictCategory,
+                      exItem.name,
+                      e.target.value as MeasurementProfile
+                    )
+                  }
+                  className="max-w-[140px] shrink-0 rounded-lg border border-[#333] bg-[#121212] px-2 py-1.5 text-[10px] text-white/80"
+                  title="Profil pomiaru"
                 >
-                  <input
-                    type="checkbox"
-                    checked={exItem.progressBy === "reps"}
-                    onChange={() =>
-                      toggleExerciseProgressBy(dictCategory, exItem.name)
-                    }
-                    className="size-[18px] shrink-0 accent-[#EF9F27]"
-                  />
-                  <span className="text-[11px] font-semibold uppercase tracking-wide text-white/50">
-                    Powt.
-                  </span>
-                </label>
+                  {(Object.keys(MEASUREMENT_PROFILE_LABELS) as MeasurementProfile[]).map(
+                    (key) => (
+                      <option key={key} value={key}>
+                        {MEASUREMENT_PROFILE_LABELS[key]}
+                      </option>
+                    )
+                  )}
+                </select>
                 {sess === 0 ? (
                   <button
                     type="button"
@@ -817,6 +872,7 @@ export default function LogTab() {
                 setExerciseSel("");
                 setChips([]);
                 setChipSets([]);
+                setFormError(null);
               }}
               className="touch-manipulation min-h-[44px] shrink-0 rounded-[10px] px-3 text-[13px] font-medium text-white/55 active:bg-white/[0.06] hover:text-[#EF9F27]"
             >
@@ -824,104 +880,73 @@ export default function LogTab() {
             </button>
           </div>
 
-          {exerciseRepsMode ? (
-            <p className="text-[11px] leading-snug text-white/48">
-              Tryb powtórzeń: wpisz serie i powtórzenia (np. 3 serie × 8 powt.). Ciężar nie jest potrzebny.
-            </p>
-          ) : null}
-
-          <div
-            className={`grid gap-2 ${exerciseRepsMode ? "grid-cols-2" : "grid-cols-3"}`}
-          >
-            {!exerciseRepsMode ? (
-              <label className="block">
-                <span className="text-[10px] uppercase tracking-wide text-white/45">
-                  Waga
-                </span>
-                <input
-                  value={wStr}
-                  inputMode="decimal"
-                  onChange={(e) => setWStr(e.target.value)}
-                  placeholder="kg"
-                  className="mt-1 w-full rounded-[10px] border border-[#333] bg-[#121212] py-3 text-center text-[18px] font-semibold outline-none focus:border-[#EF9F27]/35"
+          {isRunningExercise ? (
+            <>
+              <RunEntryForm
+                saving={runSaving}
+                error={runError}
+                onSubmit={(v) => void handleSaveRunFromLog(v)}
+              />
+              <div className="border-t border-[#333] pt-3">
+                <p className={`${sectionLabel} mb-3`}>
+                  {chartLabelForProfile("running")}
+                </p>
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {RANGES.map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setChartRange(r)}
+                      className={`${pill} ${
+                        chartRange === r ? catActive : catIdle
+                      }`}
+                    >
+                      {r}
+                    </button>
+                  ))}
+                </div>
+                <ExerciseMaxChart
+                  data={chartPoints}
+                  unit={chartUnitForProfile("running")}
                 />
-              </label>
-            ) : null}
-            <label className="block">
-              <span className="text-[10px] uppercase tracking-wide text-white/45">
-                Powt.
-              </span>
-              <input
-                type="number"
-                value={repStr}
-                onChange={(e) => setRepStr(e.target.value)}
-                className="mt-1 w-full rounded-[10px] border border-[#333] bg-[#121212] py-3 text-center text-[18px] font-semibold outline-none focus:border-[#EF9F27]/35"
+              </div>
+            </>
+          ) : (
+            <>
+              <ExerciseEntryForm
+                profile={activeProfile}
+                chips={chips}
+                onAddSet={handleAddSet}
+                onSave={() => void saveExerciseDay()}
+                formError={formError}
+                setFormError={setFormError}
               />
-            </label>
-            <label className="block">
-              <span className="text-[10px] uppercase tracking-wide text-white/45">
-                Serie
-              </span>
-              <input
-                type="number"
-                value={serieStr}
-                onChange={(e) => setSerieStr(e.target.value)}
-                className="mt-1 w-full rounded-[10px] border border-[#333] bg-[#121212] py-3 text-center text-[18px] font-semibold outline-none focus:border-[#EF9F27]/35"
-              />
-            </label>
-          </div>
 
-          <div className="flex flex-wrap gap-2">
-            {chips.map((c, i) => (
-              <span
-                key={`${c}-${i}`}
-                className="rounded-full border border-[#333] bg-[#121212] px-3 py-1 text-xs font-medium text-[#EF9F27]"
-              >
-                {c}
-              </span>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            onClick={addChip}
-            className="touch-manipulation min-h-[52px] w-full rounded-[12px] border border-[#444] bg-[#1a1a1a] py-3 text-[15px] font-semibold text-white/92 active:opacity-90 hover:border-[#EF9F27]/35"
-          >
-            + Dodaj serię
-          </button>
-          <button
-            type="button"
-            onClick={() => void saveExerciseDay()}
-            className="touch-manipulation min-h-[52px] w-full rounded-[12px] border border-[#EF9F27]/55 bg-[#EF9F27]/20 py-3 text-[15px] font-bold text-[#fff2e8] active:opacity-90 hover:bg-[#EF9F27]/30"
-          >
-            Zapisz ćwiczenie
-          </button>
-
-          <div className="border-t border-[#333] pt-3">
-            <p className={`${sectionLabel} mb-3`}>
-              {exerciseRepsMode
-                ? "Progres — max powtórzeń (w serii)"
-                : "Progres — max ciężaru (kg)"}
-            </p>
-            <div className="mb-3 flex flex-wrap gap-2">
-              {RANGES.map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  onClick={() => setChartRange(r)}
-                  className={`${pill} ${
-                    chartRange === r ? catActive : catIdle
-                  }`}
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
-            <ExerciseMaxChart
-              data={chartPoints}
-              unit={exerciseRepsMode ? "reps" : "kg"}
-            />
-          </div>
+              <div className="border-t border-[#333] pt-3">
+                <p className={`${sectionLabel} mb-3`}>
+                  {chartLabelForProfile(activeProfile)}
+                </p>
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {RANGES.map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setChartRange(r)}
+                      className={`${pill} ${
+                        chartRange === r ? catActive : catIdle
+                      }`}
+                    >
+                      {r}
+                    </button>
+                  ))}
+                </div>
+                <ExerciseMaxChart
+                  data={chartPoints}
+                  unit={chartUnitForProfile(activeProfile)}
+                />
+              </div>
+            </>
+          )}
         </section>
       )}
 
@@ -941,9 +966,15 @@ export default function LogTab() {
                 <p className="text-sm font-semibold">{e.exercise}</p>
                 <p className="text-[11px] text-white/38">{e.category}</p>
                 <p className="mt-1 text-xs text-white/82">
-                  {e.sets.map((s, i2) =>
-                    `${chipLabel(s, exerciseUsesReps(dict, e.category, e.exercise))}${i2 < e.sets.length - 1 ? ", " : ""}`
-                  )}
+                  {e.sets.map((s, i2) => {
+                    const prof = displayProfileForEntry(
+                      dict,
+                      e.category,
+                      e.exercise,
+                      e.sets
+                    );
+                    return `${formatSetLabelForProfile(s, prof)}${i2 < e.sets.length - 1 ? ", " : ""}`;
+                  })}
                 </p>
               </li>
             ))}

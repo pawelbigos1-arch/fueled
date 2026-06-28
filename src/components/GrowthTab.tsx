@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import ReflectionSection from "@/components/reflection/ReflectionSection";
-import HabitsSection from "@/components/habits/HabitsSection";
-import RulesSection from "@/components/rules/RulesSection";
+import GoalsSection from "@/components/goals/GoalsSection";
+import NewThingsSection from "@/components/new-things/NewThingsSection";
 
-type GrowthSection = "reflection" | "habits" | "rules";
+type GrowthSection = "reflection" | "goals" | "new_things";
 
 const pill =
   "touch-manipulation inline-flex min-h-[44px] flex-1 items-center justify-center rounded-full border border-[#333] px-3 py-2.5 text-[13px] font-medium leading-tight transition active:opacity-90";
@@ -19,8 +19,8 @@ export default function GrowthTab() {
         {(
           [
             ["reflection", "Refleksje"],
-            ["habits", "Nawyki"],
-            ["rules", "Zasady"],
+            ["goals", "Cele"],
+            ["new_things", "Nowe rzeczy"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -39,8 +39,8 @@ export default function GrowthTab() {
       </nav>
 
       {section === "reflection" ? <ReflectionSection /> : null}
-      {section === "habits" ? <HabitsSection /> : null}
-      {section === "rules" ? <RulesSection /> : null}
+      {section === "goals" ? <GoalsSection /> : null}
+      {section === "new_things" ? <NewThingsSection /> : null}
     </div>
   );
 }

@@ -1,3 +1,6 @@
+import type { MeasurementProfile } from "@/lib/measurement-profiles";
+import { defaultProfileForExercise } from "@/lib/measurement-profiles";
+
 export type ExerciseCategory =
   | "Klatka"
   | "Plecy"
@@ -25,7 +28,9 @@ export type ExerciseProgressBy = "weight" | "reps";
 export type DictExercise = {
   name: string;
   visible: boolean;
+  /** @deprecated używaj measurementProfile */
   progressBy?: ExerciseProgressBy;
+  measurementProfile?: MeasurementProfile;
 };
 
 export type DictStore = Partial<Record<ExerciseCategory, DictExercise[]>>;
@@ -110,16 +115,31 @@ export function mergeDictWithDefaults(stored: DictStore | null): DictStore {
     const fromStored = stored?.[cat];
 
     const byName = new Map<string, DictExercise>();
-    defaults.forEach((d) => byName.set(d.name, { ...d }));
 
     function mergeItem(item: DictExercise): DictExercise {
-      const out: DictExercise = {
+      const profile =
+        item.measurementProfile ??
+        (item.progressBy === "reps"
+          ? "bodyweight"
+          : defaultProfileForExercise(item.name));
+      const merged: DictExercise = {
         name: item.name,
         visible: item.visible !== false,
+        measurementProfile: profile,
       };
-      if (item.progressBy === "reps") out.progressBy = "reps";
-      return out;
+      if (item.progressBy === "reps") merged.progressBy = "reps";
+      return merged;
     }
+
+    defaults.forEach((d) =>
+      byName.set(
+        d.name,
+        mergeItem({
+          ...d,
+          measurementProfile: defaultProfileForExercise(d.name),
+        })
+      )
+    );
 
     fromStored?.forEach((item) => {
       if (!item?.name) return;

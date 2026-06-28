@@ -32,4 +32,33 @@ export type PersonalRuleRow = {
   updated_at: string;
 };
 
+export type ProjectRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  sort_order: number;
+  active: boolean;
+};
+
+export type DatedGoalRow = {
+  id: string;
+  user_id: string;
+  date: string;
+  project_id: string | null;
+  title: string;
+  description: string;
+  sort_order: number;
+};
+
+export type NewThingRow = {
+  id: string;
+  user_id: string;
+  status: "planned" | "done";
+  title: string;
+  description: string;
+  planned_date: string | null;
+  done_date: string | null;
+  sort_order: number;
+};
+
 export type ReflectionViewMode = "day" | "week" | "export";

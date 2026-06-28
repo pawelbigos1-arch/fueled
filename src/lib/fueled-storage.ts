@@ -47,7 +47,17 @@ export type WeightDay = {
 
 export type WeightStorage = Record<string, WeightDay>;
 
-export type LogSet = { weight: number; reps: number; series: number };
+export type LogSet = {
+  weight?: number;
+  reps?: number;
+  series?: number;
+  distance_km?: number;
+  duration_sec?: number;
+  pace_min_per_km?: number;
+  steps?: number;
+  kcal_burned?: number;
+  negative_duration_sec?: number;
+};
 
 export type LogEntry = {
   id: string;
@@ -79,4 +89,14 @@ export function addDays(d: Date, n: number): Date {
   const x = new Date(d);
   x.setDate(x.getDate() + n);
   return x;
+}
+
+/** Dzisiejsza data w strefie lokalnej (YYYY-MM-DD) — spójnie w całej aplikacji */
+export function getTodayKey(): string {
+  return formatDateKey(new Date());
+}
+
+/** Przesuwa klucz daty o N dni (lokalna strefa) */
+export function addDaysToKey(key: string, deltaDays: number): string {
+  return formatDateKey(addDays(parseDateKey(key), deltaDays));
 }

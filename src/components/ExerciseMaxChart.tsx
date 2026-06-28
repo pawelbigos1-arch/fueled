@@ -9,27 +9,53 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import type { ChartUnit } from "@/lib/measurement-profiles";
 
 export type ExerciseChartPoint = { dateLabel: string; value: number };
+
+function unitSuffix(unit: ChartUnit): string {
+  switch (unit) {
+    case "kg":
+      return "kg";
+    case "reps":
+      return "powt.";
+    case "sec":
+      return "s";
+    case "km":
+      return "km";
+  }
+}
+
+function emptyHint(unit: ChartUnit): string {
+  switch (unit) {
+    case "kg":
+      return "zapisuj serie z ciężarem";
+    case "reps":
+      return "zapisuj serie i powtórzenia";
+    case "sec":
+      return "zapisuj czasy trzymania";
+    case "km":
+      return "zapisuj dystans";
+  }
+}
 
 export default function ExerciseMaxChart({
   data,
   unit,
 }: {
   data: ExerciseChartPoint[];
-  unit: "kg" | "reps";
+  unit: ChartUnit;
 }) {
   if (data.length === 0) {
     return (
       <p className="py-6 text-center text-sm text-white/35">
-        Za mało danych pod wybrany zakres —{" "}
-        {unit === "kg"
-          ? "zapisuj serie z ciężarem"
-          : "zapisuj serie i powtórzenia"}
-        , aby pojawiła się krzywa.
+        Za mało danych pod wybrany zakres — {emptyHint(unit)}, aby pojawiła się
+        krzywa.
       </p>
     );
   }
+
+  const suffix = unitSuffix(unit);
 
   return (
     <ResponsiveContainer width="100%" height={220}>
@@ -49,7 +75,12 @@ export default function ExerciseMaxChart({
           labelStyle={{ color: "#fafafa", fontWeight: 600 }}
           formatter={(v) =>
             typeof v === "number"
-              ? [`${Math.round(v)} ${unit === "kg" ? "kg" : "powt."}`, "Max"]
+              ? [
+                  unit === "km"
+                    ? `${v.toFixed(2)} ${suffix}`
+                    : `${Math.round(v)} ${suffix}`,
+                  "Max",
+                ]
               : [String(v), ""]
           }
         />

@@ -5,7 +5,9 @@ import { createBrowserClient } from "@supabase/ssr";
 import {
   DEFAULT_GOAL_LS,
   addDays,
+  addDaysToKey,
   formatDateKey,
+  getTodayKey,
   parseDateKey,
 } from "@/lib/fueled-storage";
 import {
@@ -19,6 +21,8 @@ import {
   YAxis,
 } from "recharts";
 import VoiceDictationButton from "@/components/VoiceDictationButton";
+import CopyMealsModal from "@/components/CopyMealsModal";
+import RunEntryForm, { type RunEntryValues } from "@/components/RunEntryForm";
 
 const TODAY_FALLBACK = {
   calorieGoal: DEFAULT_GOAL_LS.calories,
@@ -152,13 +156,6 @@ function caloriesFromSteps(steps: number, weightKg: number): number {
   return Math.round((steps / 1000) * (weightKg * 0.5));
 }
 
-/** YYYY-MM-DD (UTC) + delta dni — spójnie z `toISOString().slice(0, 10)` */
-function addDaysUtcYmd(ymd: string, deltaDays: number): string {
-  const [y, m, d] = ymd.split("-").map((x) => parseInt(x, 10));
-  const t = Date.UTC(y, m - 1, d + deltaDays);
-  return new Date(t).toISOString().slice(0, 10);
-}
-
 const LEGACY_MEAL_ACTIVITY_LS_KEYS = [
   "fueled_today_meals",
   "fueled_today_workouts",
@@ -198,15 +195,18 @@ export default function TodayTab() {
 
   const [activityText, setActivityText] = useState("");
   const [activityKcal, setActivityKcal] = useState("");
+  const [activityMode, setActivityMode] = useState<"manual" | "run">("manual");
+  const [runSaving, setRunSaving] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
   const [stepsStr, setStepsStr] = useState("");
   const [stepsWeightManualStr, setStepsWeightManualStr] = useState("");
   const [stepsSaving, setStepsSaving] = useState(false);
   const [stepsError, setStepsError] = useState<string | null>(null);
   const [latestWeightKg, setLatestWeightKg] = useState<number | null>(null);
 
-  const [todayKey, setTodayKey] = useState(() =>
-    new Date().toISOString().slice(0, 10)
-  );
+  const [todayKey, setTodayKey] = useState(() => getTodayKey());
+  const [selectedDay, setSelectedDay] = useState(() => getTodayKey());
+  const [copyMealsOpen, setCopyMealsOpen] = useState(false);
 
   const [calorieGoal, setCalorieGoal] = useState<number>(
     TODAY_FALLBACK.calorieGoal
@@ -267,7 +267,7 @@ export default function TodayTab() {
   const fetchWeekTotals = useCallback(
     async (userId: string, endYmd: string) => {
       try {
-        const start = addDaysUtcYmd(endYmd, -6);
+        const start = addDaysToKey(endYmd, -6);
         const [{ data: mt, error: em }, { data: at, error: ea }] =
           await Promise.all([
             supabase
@@ -323,8 +323,7 @@ export default function TodayTab() {
         if (authErr) console.error("[TodayTab] meal insert auth:", authErr.message);
         if (!user) return false;
 
-        const today = new Date().toISOString().slice(0, 10);
-        setTodayKey(today);
+        const today = selectedDay;
 
         const { data: inserted, error } = await supabase
           .from("meals")
@@ -357,7 +356,7 @@ export default function TodayTab() {
           setMeals((prev) => (mapped ? [...prev, mapped] : prev));
         }
 
-        await fetchWeekTotals(user.id, today);
+        await fetchWeekTotals(user.id, getTodayKey());
         return true;
       } catch (err) {
         console.error("[TodayTab] meal insert:", err);
@@ -365,7 +364,7 @@ export default function TodayTab() {
         return false;
       }
     },
-    [supabase, fetchWeekTotals]
+    [supabase, fetchWeekTotals, selectedDay]
   );
 
   const hydrate = useCallback(async () => {
@@ -387,8 +386,9 @@ export default function TodayTab() {
         return;
       }
 
-      const today = new Date().toISOString().slice(0, 10);
+      const today = getTodayKey();
       setTodayKey(today);
+      const day = selectedDay;
 
       const { data: gRow, error: eg } = await supabase
         .from("goals")
@@ -406,7 +406,7 @@ export default function TodayTab() {
         .from("meals")
         .select("*")
         .eq("user_id", user.id)
-        .eq("date", today);
+        .eq("date", day);
       if (em) {
         console.error("[TodayTab] meals:", em.message);
         setMeals([]);
@@ -418,7 +418,7 @@ export default function TodayTab() {
         .from("activities")
         .select("*")
         .eq("user_id", user.id)
-        .eq("date", today);
+        .eq("date", day);
       if (ea) {
         console.error("[TodayTab] activities:", ea.message);
         setWorkouts([]);
@@ -464,7 +464,7 @@ export default function TodayTab() {
       setGoalsLoading(false);
       setDataLoading(false);
     }
-  }, [applyGoals, fetchWeekTotals, supabase]);
+  }, [applyGoals, fetchWeekTotals, selectedDay, supabase]);
 
   useEffect(() => {
     void hydrate();
@@ -532,13 +532,13 @@ export default function TodayTab() {
     }> = [];
 
     for (let offset = -6; offset <= 0; offset += 1) {
-      const dk = addDaysUtcYmd(todayKey, offset);
-      const isToday = dk === todayKey;
+      const dk = addDaysToKey(todayKey, offset);
+      const isLiveToday = dk === todayKey && selectedDay === todayKey;
 
       let consumed = 0;
       let burned = 0;
 
-      if (isToday) {
+      if (isLiveToday) {
         consumed = meals.reduce((s, m) => s + Math.max(0, m.calories), 0);
         burned = workouts.reduce(
           (s, w) => s + Math.max(0, w.caloriesBurned),
@@ -566,7 +566,7 @@ export default function TodayTab() {
     }
 
     return rows;
-  }, [todayKey, meals, workouts, calorieGoal, weekAgg]);
+  }, [todayKey, selectedDay, meals, workouts, calorieGoal, weekAgg]);
 
   const imagePortionPreview = useMemo(() => {
     if (!imageMealDraft) return null;
@@ -751,14 +751,13 @@ export default function TodayTab() {
       if (authErr) console.error("[TodayTab] meal manual auth:", authErr.message);
       if (!user) return;
 
-      const today = new Date().toISOString().slice(0, 10);
-      setTodayKey(today);
+      const day = selectedDay;
 
       const { data: inserted, error } = await supabase
         .from("meals")
         .insert({
           user_id: user.id,
-          date: today,
+          date: day,
           name: label,
           kcal,
           protein: protein_g,
@@ -782,7 +781,7 @@ export default function TodayTab() {
       setManualPStr("");
       setManualCStr("");
       setManualFStr("");
-      await fetchWeekTotals(user.id, today);
+      await fetchWeekTotals(user.id, getTodayKey());
     } catch (err) {
       console.error("[TodayTab] meal manual:", err);
     }
@@ -797,20 +796,15 @@ export default function TodayTab() {
       if (authErr) console.error("[TodayTab] meal delete auth:", authErr.message);
       if (!user) return;
 
-      const today = new Date().toISOString().slice(0, 10);
-      setTodayKey(today);
-
-      const { error } = await supabase
-        .from("meals")
-        .delete()
-        .eq("id", id)
-        .eq("user_id", user.id);
+      const { error } = await supabase.rpc("delete_meal_and_sync_plan", {
+        p_meal_id: id,
+      });
       if (error) {
         console.error("[TodayTab] meal delete:", error.message);
         return;
       }
       setMeals((prev) => prev.filter((m) => m.id !== id));
-      await fetchWeekTotals(user.id, today);
+      await fetchWeekTotals(user.id, getTodayKey());
     } catch (err) {
       console.error("[TodayTab] meal delete:", err);
     }
@@ -847,8 +841,7 @@ export default function TodayTab() {
       if (authErr) console.error("[TodayTab] steps auth:", authErr.message);
       if (!user) return;
 
-      const today = new Date().toISOString().slice(0, 10);
-      setTodayKey(today);
+      const day = selectedDay;
 
       const kcalBurned = caloriesFromSteps(steps, weightKg);
       const weightLabel = Number.isInteger(weightKg)
@@ -856,36 +849,52 @@ export default function TodayTab() {
         : weightKg.toFixed(1);
       const activityName = `Kroki — ${steps} kroków (${weightLabel} kg)`;
 
-      const { data: inserted, error } = await supabase
-        .from("activities")
-        .insert({
-          user_id: user.id,
-          date: today,
-          name: activityName,
-          kcal_burned: kcalBurned,
-        })
-        .select("*")
-        .single();
+      const { data: activityId, error } = await supabase.rpc("log_steps_dual", {
+        p_date: day,
+        p_steps: steps,
+        p_weight_kg: weightKg,
+        p_kcal_burned: kcalBurned,
+      });
 
       if (error) {
         console.error("[TodayTab] steps insert:", error.message);
-        setStepsError(error.message);
-        return;
-      }
-
-      const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
-      if (r) {
+        const { data: inserted, error: fallbackErr } = await supabase
+          .from("activities")
+          .insert({
+            user_id: user.id,
+            date: day,
+            name: activityName,
+            kcal_burned: kcalBurned,
+          })
+          .select("*")
+          .single();
+        if (fallbackErr) {
+          setStepsError(fallbackErr.message);
+          return;
+        }
+        const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
+        if (r) {
+          setWorkouts((prev) => [
+            ...prev,
+            {
+              id: r.id,
+              description: r.name,
+              caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+            },
+          ]);
+        }
+      } else if (activityId) {
         setWorkouts((prev) => [
           ...prev,
           {
-            id: r.id,
-            description: r.name,
-            caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+            id: String(activityId),
+            description: activityName,
+            caloriesBurned: kcalBurned,
           },
         ]);
       }
       setStepsStr("");
-      await fetchWeekTotals(user.id, today);
+      await fetchWeekTotals(user.id, getTodayKey());
     } catch (err) {
       console.error("[TodayTab] steps insert:", err);
       setStepsError("Nie udało się dodać kroków.");
@@ -911,41 +920,108 @@ export default function TodayTab() {
       if (authErr) console.error("[TodayTab] activity add auth:", authErr.message);
       if (!user) return;
 
-      const today = new Date().toISOString().slice(0, 10);
-      setTodayKey(today);
+      const day = selectedDay;
 
-      const { data: inserted, error } = await supabase
-        .from("activities")
-        .insert({
-          user_id: user.id,
-          date: today,
-          name: description,
-          kcal_burned: caloriesBurned,
-        })
-        .select("*")
-        .single();
+      const { data: activityId, error } = await supabase.rpc(
+        "log_manual_activity_dual",
+        {
+          p_date: day,
+          p_name: description,
+          p_kcal_burned: caloriesBurned,
+        }
+      );
 
       if (error) {
         console.error("[TodayTab] activity insert:", error.message);
-        return;
-      }
-
-      const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
-      if (r) {
+        const { data: inserted, error: fallbackErr } = await supabase
+          .from("activities")
+          .insert({
+            user_id: user.id,
+            date: day,
+            name: description,
+            kcal_burned: caloriesBurned,
+          })
+          .select("*")
+          .single();
+        if (fallbackErr) return;
+        const r = inserted as { id: string; name: string; kcal_burned: number | null } | null;
+        if (r) {
+          setWorkouts((prev) => [
+            ...prev,
+            {
+              id: r.id,
+              description: r.name,
+              caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+            },
+          ]);
+        }
+      } else if (activityId) {
         setWorkouts((prev) => [
           ...prev,
           {
-            id: r.id,
-            description: r.name,
-            caloriesBurned: Math.max(0, Math.round(Number(r.kcal_burned) || 0)),
+            id: String(activityId),
+            description,
+            caloriesBurned,
           },
         ]);
       }
       setActivityText("");
       setActivityKcal("");
-      await fetchWeekTotals(user.id, today);
+      await fetchWeekTotals(user.id, getTodayKey());
     } catch (err) {
       console.error("[TodayTab] activity insert:", err);
+    }
+  }
+
+  async function handleSaveRun(values: RunEntryValues) {
+    setRunError(null);
+    setRunSaving(true);
+    try {
+      const {
+        data: { user },
+        error: authErr,
+      } = await supabase.auth.getUser();
+      if (authErr) console.error("[TodayTab] run auth:", authErr.message);
+      if (!user) return;
+
+      const totalDurationSec = values.durationMin * 60 + values.durationSec;
+      const day = selectedDay;
+
+      const { data: activityId, error } = await supabase.rpc("log_run_dual", {
+        p_date: day,
+        p_kcal_burned: values.kcalBurned,
+        p_distance_km: values.distanceKm,
+        p_duration_sec: totalDurationSec,
+        p_pace_min_per_km: values.paceMinPerKm,
+      });
+
+      if (error) {
+        console.error("[TodayTab] run insert:", error.message);
+        setRunError(error.message);
+        return;
+      }
+
+      if (activityId) {
+        const minP = Math.floor(values.paceMinPerKm);
+        const secP = Math.round((values.paceMinPerKm - minP) * 60);
+        const description = `Bieganie — ${values.distanceKm.toFixed(2)} km, ${minP}:${String(secP).padStart(2, "0")} min/km`;
+        setWorkouts((prev) => [
+          ...prev,
+          {
+            id: String(activityId),
+            description,
+            caloriesBurned: values.kcalBurned,
+          },
+        ]);
+      }
+
+      setActivityMode("manual");
+      await fetchWeekTotals(user.id, getTodayKey());
+    } catch (err) {
+      console.error("[TodayTab] run insert:", err);
+      setRunError("Nie udało się zapisać biegu.");
+    } finally {
+      setRunSaving(false);
     }
   }
 
@@ -957,20 +1033,23 @@ export default function TodayTab() {
       } = await supabase.auth.getUser();
       if (authErr) console.error("[TodayTab] activity delete auth:", authErr.message);
       if (!user) return;
-      const today = new Date().toISOString().slice(0, 10);
-      setTodayKey(today);
 
-      const { error } = await supabase
-        .from("activities")
-        .delete()
-        .eq("id", id)
-        .eq("user_id", user.id);
+      const { error } = await supabase.rpc("delete_activity_and_journal", {
+        p_activity_id: id,
+      });
+
       if (error) {
         console.error("[TodayTab] activity delete:", error.message);
-        return;
+        const { error: fallbackErr } = await supabase
+          .from("activities")
+          .delete()
+          .eq("id", id)
+          .eq("user_id", user.id);
+        if (fallbackErr) return;
       }
+
       setWorkouts((prev) => prev.filter((w) => w.id !== id));
-      await fetchWeekTotals(user.id, today);
+      await fetchWeekTotals(user.id, getTodayKey());
     } catch (err) {
       console.error("[TodayTab] activity delete:", err);
     }
@@ -984,11 +1063,59 @@ export default function TodayTab() {
   const remainingColorClass =
     totals.remaining >= 0 ? "text-[#3B6D11]" : "text-red-500";
 
+  function shiftDay(delta: number) {
+    setSelectedDay(formatDateKey(addDays(parseDateKey(selectedDay), delta)));
+  }
+
+  const dateLabel = useMemo(() => {
+    if (selectedDay === todayKey) return "Dziś";
+    try {
+      return parseDateKey(selectedDay).toLocaleDateString("pl-PL", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+      });
+    } catch {
+      return selectedDay;
+    }
+  }, [selectedDay, todayKey]);
+
   return (
     <div className="flex flex-col gap-5 text-white">
       {goalsLoading || dataLoading ? (
         <p className="text-center text-xs text-white/45">Ładowanie...</p>
       ) : null}
+
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => shiftDay(-1)}
+          className="rounded-lg border border-[#2A2A2A] bg-[#1E1E1E] px-3 py-2 text-lg hover:bg-[#252525]"
+          aria-label="Poprzedni dzień"
+        >
+          ‹
+        </button>
+        <div className="min-w-0 flex-1 text-center">
+          <p className="truncate text-[13px] capitalize text-white/80">{dateLabel}</p>
+          {selectedDay !== todayKey ? (
+            <button
+              type="button"
+              onClick={() => setSelectedDay(todayKey)}
+              className="mt-0.5 text-[11px] text-[#EF9F27] underline-offset-2 hover:underline"
+            >
+              Wróć do dziś
+            </button>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={() => shiftDay(1)}
+          className="rounded-lg border border-[#2A2A2A] bg-[#1E1E1E] px-3 py-2 text-lg hover:bg-[#252525]"
+          aria-label="Następny dzień"
+        >
+          ›
+        </button>
+      </div>
 
       <section>
         <div className="grid grid-cols-3 gap-2">
@@ -1060,9 +1187,18 @@ export default function TodayTab() {
       </section>
 
       <section>
-        <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/80">
-          POSIŁKI
-        </h2>
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h2 className="text-[11px] font-bold uppercase tracking-widest text-white/80">
+            POSIŁKI
+          </h2>
+          <button
+            type="button"
+            onClick={() => setCopyMealsOpen(true)}
+            className="shrink-0 rounded-lg border border-white/15 px-2.5 py-1 text-[11px] font-medium text-white/65 hover:border-[#EF9F27]/45 hover:text-[#EF9F27]"
+          >
+            Kopiuj z dnia
+          </button>
+        </div>
         <p className="mb-2 text-[11px] leading-snug text-white/40">
           <strong className="text-white/55">AI</strong> szacuje makra z opisu;{" "}
           <strong className="text-white/55">własne kcal</strong> — gdy znasz wartość z opakowania
@@ -1383,6 +1519,50 @@ export default function TodayTab() {
         <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/80">
           AKTYWNOŚĆ
         </h2>
+        <div
+          className="mb-3 flex rounded-xl border border-white/12 bg-black/25 p-0.5"
+          role="tablist"
+          aria-label="Typ aktywności"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activityMode === "manual"}
+            onClick={() => setActivityMode("manual")}
+            className={`flex-1 rounded-[10px] py-2 text-xs font-medium transition ${
+              activityMode === "manual"
+                ? "bg-white/10 text-white"
+                : "text-white/50 hover:text-white/75"
+            }`}
+          >
+            Opis + kcal
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activityMode === "run"}
+            onClick={() => setActivityMode("run")}
+            className={`flex-1 rounded-[10px] py-2 text-xs font-medium transition ${
+              activityMode === "run"
+                ? "bg-white/10 text-white"
+                : "text-white/50 hover:text-white/75"
+            }`}
+          >
+            Bieganie
+          </button>
+        </div>
+
+        {activityMode === "run" ? (
+          <RunEntryForm
+            saving={runSaving}
+            error={runError}
+            onCancel={() => {
+              setActivityMode("manual");
+              setRunError(null);
+            }}
+            onSubmit={(v) => void handleSaveRun(v)}
+          />
+        ) : (
         <form onSubmit={(e) => void handleAddActivity(e)} className="space-y-3">
           <div className="flex items-start gap-2">
             <textarea
@@ -1416,13 +1596,14 @@ export default function TodayTab() {
             Dodaj aktywność
           </button>
         </form>
+        )}
 
         {workouts.length === 0 ? (
           <p className="mt-8 flex flex-col items-center gap-2 text-center text-sm text-white/35">
             <span aria-hidden className="text-lg">
               ⌄
             </span>
-            Brak aktywności na dziś
+            Brak aktywności w tym dniu
           </p>
         ) : (
           <ul className="mt-4 space-y-2">
@@ -1585,6 +1766,14 @@ export default function TodayTab() {
           </div>
         </div>
       </section>
+
+      {copyMealsOpen ? (
+        <CopyMealsModal
+          targetDay={selectedDay}
+          onClose={() => setCopyMealsOpen(false)}
+          onCopied={() => void hydrate()}
+        />
+      ) : null}
     </div>
   );
 }

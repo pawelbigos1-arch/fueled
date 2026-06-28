@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase";
 import { authErrorMessage } from "@/lib/auth-messages";
 import { getPublicSiteUrl } from "@/lib/site-url";
 
-type Mode = "login" | "register";
+type Mode = "login" | "register" | "forgot";
 
 const inputCls =
   "w-full rounded-xl border border-white/15 bg-black/40 px-4 py-3 text-sm text-white outline-none placeholder:text-white/40 focus:border-[#EF9F27]";
@@ -74,7 +74,12 @@ export default function LoginForm() {
     });
 
     if (signInError) {
-      setError(authErrorMessage(signInError.message));
+      const msg = authErrorMessage(signInError.message);
+      setError(
+        msg.includes("Nieprawidłowy")
+          ? `${msg} Użyj „Zapomniałem hasła”, jeśli konto zakładałeś wcześniej inną metodą.`
+          : msg
+      );
       setLoading(false);
       return;
     }
@@ -135,6 +140,37 @@ export default function LoginForm() {
     setLoading(false);
   }
 
+  async function handleForgotPassword(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setMessage(null);
+    setError(null);
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setError("Podaj email.");
+      return;
+    }
+
+    setLoading(true);
+    const supabase = createClient();
+    const site = getPublicSiteUrl(window.location.origin);
+
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(
+      trimmedEmail,
+      { redirectTo: `${site}/auth/callback?type=recovery` }
+    );
+
+    if (resetError) {
+      setError(authErrorMessage(resetError.message));
+      setLoading(false);
+      return;
+    }
+
+    setMessage("Wysłaliśmy link do ustawienia nowego hasła — sprawdź email.");
+    setMode("login");
+    setLoading(false);
+  }
+
   return (
     <main className="flex min-h-screen items-center justify-center bg-[#1A1A1A] px-6">
       <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-black/20 p-8">
@@ -191,6 +227,42 @@ export default function LoginForm() {
               className="w-full rounded-xl bg-[#EF9F27] px-5 py-3 text-sm font-semibold text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
             >
               {loading ? "Logowanie…" : "Zaloguj się"}
+            </button>
+            <button
+              type="button"
+              onClick={() => switchMode("forgot")}
+              className="w-full text-center text-xs text-white/45 underline-offset-2 hover:text-white/70 hover:underline"
+            >
+              Zapomniałem hasła
+            </button>
+          </form>
+        ) : mode === "forgot" ? (
+          <form onSubmit={(e) => void handleForgotPassword(e)} className="space-y-4">
+            <p className="text-sm text-white/55">
+              Podaj email — wyślemy link do ustawienia nowego hasła.
+            </p>
+            <input
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email (login)"
+              className={inputCls}
+            />
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full rounded-xl bg-[#EF9F27] px-5 py-3 text-sm font-semibold text-black disabled:opacity-70"
+            >
+              {loading ? "Wysyłanie…" : "Wyślij link resetu"}
+            </button>
+            <button
+              type="button"
+              onClick={() => switchMode("login")}
+              className="w-full text-center text-xs text-white/45 hover:text-white/70"
+            >
+              ← Wróć do logowania
             </button>
           </form>
         ) : (

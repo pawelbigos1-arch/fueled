@@ -7,16 +7,18 @@ import { createClient } from "@/lib/supabase";
 import TodayTab from "@/components/TodayTab";
 import PlanTab from "@/components/PlanTab";
 import LogTab from "@/components/LogTab";
+import WeekTab from "@/components/WeekTab";
 import GoalTab from "@/components/GoalTab";
 import AnalysisTab from "@/components/AnalysisTab";
 import GrowthTab from "@/components/GrowthTab";
 
-type TabId = "today" | "plan" | "log" | "goal" | "analysis" | "growth";
+type TabId = "today" | "plan" | "log" | "week" | "goal" | "analysis" | "growth";
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: "today", label: "Dziś", icon: "☀️" },
   { id: "plan", label: "Plan", icon: "📋" },
   { id: "log", label: "Dziennik", icon: "🏋️" },
+  { id: "week", label: "Tydzień", icon: "📅" },
   { id: "goal", label: "Cel", icon: "🎯" },
   { id: "analysis", label: "Analiza", icon: "📊" },
   { id: "growth", label: "Rozwój", icon: "🧠" },
@@ -92,7 +94,7 @@ export default function AppPage() {
   };
 
   const btnBase =
-    "touch-manipulation flex min-h-[52px] min-w-0 flex-1 select-none flex-col items-center justify-center gap-1 rounded-[14px] border px-1.5 py-2.5 text-center transition active:opacity-90";
+    "touch-manipulation flex min-h-[48px] min-w-[52px] shrink-0 select-none flex-col items-center justify-center gap-0.5 rounded-[12px] border px-1 py-2 text-center transition active:opacity-90";
   const btnActive =
     "border-white/40 bg-[#252525] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]";
   const btnIdle =
@@ -138,7 +140,10 @@ export default function AppPage() {
             </div>
           </div>
 
-          <nav className="flex gap-2.5" aria-label="Główna nawigacja">
+          <nav
+            className="-mx-1 flex gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            aria-label="Główna nawigacja"
+          >
             {TABS.map(({ id, label, icon }) => {
               const isActive = activeTab === id;
               return (
@@ -150,13 +155,13 @@ export default function AppPage() {
                   className={`${btnBase} ${isActive ? btnActive : btnIdle}`}
                 >
                   <span
-                    className="text-[1.35rem] leading-none"
+                    className="text-[1.15rem] leading-none"
                     aria-hidden
                   >
                     {icon}
                   </span>
                   <span
-                    className={`block max-w-full truncate text-[12px] leading-tight tracking-tight sm:text-[13px] ${isActive ? "font-semibold" : "font-medium"}`}
+                    className={`block max-w-full truncate text-[10px] leading-tight tracking-tight sm:text-[11px] ${isActive ? "font-semibold" : "font-medium"}`}
                   >
                     {label}
                   </span>
@@ -170,6 +175,7 @@ export default function AppPage() {
           {activeTab === "today" ? <TodayTab /> : null}
           {activeTab === "plan" ? <PlanTab /> : null}
           {activeTab === "log" ? <LogTab /> : null}
+          {activeTab === "week" ? <WeekTab /> : null}
           {activeTab === "goal" ? <GoalTab /> : null}
           {activeTab === "analysis" ? <AnalysisTab /> : null}
           {activeTab === "growth" ? <GrowthTab /> : null}

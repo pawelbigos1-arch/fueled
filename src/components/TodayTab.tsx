@@ -22,6 +22,7 @@ import {
 } from "recharts";
 import VoiceDictationButton from "@/components/VoiceDictationButton";
 import CopyMealsModal from "@/components/CopyMealsModal";
+import SupplementsTodaySection from "@/components/supplements/SupplementsTodaySection";
 import RunEntryForm, { type RunEntryValues } from "@/components/RunEntryForm";
 
 const TODAY_FALLBACK = {
@@ -1465,6 +1466,8 @@ export default function TodayTab() {
           </ul>
         )}
       </section>
+
+      <SupplementsTodaySection dateKey={selectedDay} />
 
       <section>
         <h2 className="mb-3 text-[11px] font-bold uppercase tracking-widest text-white/80">
